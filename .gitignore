@@ -1,0 +1,23 @@
+# Ignore everything inside these folders
+amass/
+joints/
+new_joints/
+new_joint_vecs/
+pose_data/
+texts/
+
+# Ignore archives everywhere
+*.zip
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.xz
+*.bz2
+
+# Ignore everything by default (optional safety)
+# *
+
+# BUT keep only root-level Python and notebooks
+!/*.py
+!/*.ipynb
