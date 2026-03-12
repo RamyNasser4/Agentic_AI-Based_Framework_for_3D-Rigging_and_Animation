@@ -44,7 +44,106 @@ SYSTEM_MESSAGE = ( \
     "Armature/Root/Head,(0.0,0.7,0.0,0.0,0.7),(1.3,0.6,0.0,0.0,0.8),(2.6,0.7,0.0,0.0,0.7),(2.8,0.7,0.0,0.0,0.7)" \
 )
 
-
+animation_examples = [
+    {
+        "object": "racoon",
+        "object_json": (
+                    "name:metarig,position:(0.00,0.00,0.00),rotation:(-0.7,0.0,0.0,0.7),"
+                    "children:[name:spine,position:(0.00,0.00,0.00),rotation"
+                    ":(0.7,0.0,0.0,0.7),children:[name:pelvis.L,position"
+                    ":(0.00,0.00,0.00),rotation:(-0.2,0.6,0.7,0.4),name:pelvis.R,"
+                    "position:(0.00,0.00,0.00),rotation:(0.2,0.6,0.7,-0.4),name:spine"
+                    ".001,position:(0.00,0.00,0.00),rotation:(0.0,0.0,0.0,1.0),children"
+                    ":[name:spine.002,position:(0.00,0.00,0.00),rotation"
+                    ":(0.0,0.0,0.0,1.0),children:[name:spine.003,position"
+                    ":(0.00,0.00,0.00),rotation:(-0.1,0.0,0.0,1.0),children:[name:"
+                    "breast.L,position:(0.00,0.00,0.00),rotation:(0.0,0.8,0.6,0.0),name"
+                    ":breast.R,position:(0.00,0.00,0.00),rotation:(0.0,0.8,0.6,0.0),"
+                    "name:shoulder.L,position:(0.00,0.00,0.00),rotation"
+                    ":(-0.7,0.2,0.4,0.6),children:[name:upper_arm.L,position"
+                    ":(0.00,0.00,0.00),rotation:(0.2,-0.7,0.4,0.5),children:[name:"
+                    "forearm.L,position:(0.00,0.00,0.00),rotation:(0.5,0.0,0.0,0.8),"
+                    "children:[name:hand.L,position:(0.00,0.00,0.00),rotation"
+                    ":(0.1,0.0,-0.1,1.0)]]],name:shoulder.R,position:(0.00,0.00,0.00),"
+                    "rotation:(-0.7,-0.2,-0.4,0.6),children:[name:upper_arm.R,position"
+                    ":(0.00,0.00,0.00),rotation:(-0.1,0.9,-0.3,0.4),children:[name:"
+                    "forearm.R,position:(0.00,0.00,0.00),rotation:(-0.1,0.2,-0.6,0.8),"
+                    "children:[name:hand.R,position:(0.00,0.00,0.00),rotation"
+                    ":(0.1,0.1,-0.2,1.0),children:[name:hand.R.001,position"
+                    ":(0.00,0.00,0.00),rotation:(0.3,0.0,0.7,0.6),children:[name:"
+                    "Spork_low,position:(0.00,0.00,0.00),rotation:(0.0,0.7,-0.7,0.1)"
+                    "]]]]],name:spine.006,position:(0.00,0.00,0.00),rotation"
+                    ":(-0.1,0.0,0.0,1.0),children:[name:ear.L,position:(0.00,0.01,0.00)"
+                    ",rotation:(-0.1,-0.1,0.2,1.0),name:ear.R,position:(0.00,0.01,0.00)"
+                    ",rotation:(-0.1,0.1,-0.5,0.9)]]]],name:tail,position"
+                    ":(0.00,0.00,0.00),rotation:(0.8,0.4,-0.1,-0.3),children:[name:tail"
+                    ".001,position:(0.00,0.00,0.00),rotation:(-0.2,0.1,-0.2,1.0),"
+                    "children:[name:tail.002,position:(0.00,0.00,0.00),rotation"
+                    ":(0.0,0.5,-0.5,0.7),children:[name:tail.003,position"
+                    ":(0.00,0.00,0.00),rotation:(-0.5,0.0,0.0,0.8)]]],name:thigh.L,"
+                    "position:(0.00,0.00,0.00),rotation:(1.0,0.1,-0.3,0.0),children:["
+                    "name:shin.L,position:(0.00,0.00,0.00),rotation:(0.2,0.3,-0.1,0.9),"
+                    "children:[name:foot.L,position:(0.00,0.00,0.00),rotation"
+                    ":(-0.5,0.1,0.2,0.8),children:[name:heel.02.L,position"
+                    ":(0.00,0.00,0.00),rotation:(-0.6,0.6,-0.2,-0.5),name:toe.L,"
+                    "position:(0.00,0.00,0.00),rotation:(-0.3,0.8,-0.4,-0.3)]]],name:"
+                    "thigh.R,position:(0.00,0.00,0.00),rotation:(1.0,-0.1,0.3,0.0),"
+                    "children:[name:shin.R,position:(0.00,0.00,0.00),rotation"
+                    ":(0.2,-0.3,0.1,0.9),children:[name:foot.R,position"
+                    ":(0.00,0.00,0.00),rotation:(-0.5,-0.1,-0.2,0.8),children:[name:"
+                    "heel.02.R,position:(0.00,0.00,0.00),rotation:(0.6,0.6,-0.2,0.5),"
+                    "name:toe.R,position:(0.00,0.00,0.00),rotation:(0.3,0.8,-0.4,0.3)"
+                    "]]]]]"
+                ),
+        "instruction": "idle while moving head up and down",
+        "animation": (
+                        "metarig,[0.00,0.00,0.00,0.00],[1.56,0.00,0.00,0.00]"
+                        "metarig/spine/spine.001/spine.002/spine.003/spine"
+                        ".006,(0.0,-0.1,0.0,0.0,1.0),(0.5,-0.1,0.0,0.0,1.0)"
+                        ",(0.8,-0.1,0.0,0.0,1.0),(1.2,0.0,0.0,0.0,1.0)"
+                        ",(1.6,-0.1,0.0,0.0,1.0)"
+                        "metarig/spine/spine.001/spine.002/spine.003/spine.006/ear.L"
+                        ",(0.0,-0.1,-0.1,0.1,1.0),(0.2,-0.1,0.0,0.0,1.0)"
+                        ",(0.4,0.0,-0.1,0.1,1.0),(0.6,0.0,-0.1,0.2,1.0)"
+                        ",(1.0,-0.1,-0.1,0.2,1.0),(1.2,0.0,-0.1,0.2,1.0)"
+                        ",(1.5,-0.1,-0.1,0.1,1.0),(1.6,-0.1,-0.1,0.1,1.0)"
+                        "metarig/spine/spine.001/spine.002/spine.003/spine.006/ear.R"
+                        ",(0.0,-0.1,0.0,-0.3,1.0),(0.2,-0.1,0.0,-0.3,0.9)"
+                        ",(0.4,0.0,0.1,-0.2,1.0),(0.6,0.0,0.0,-0.2,1.0)"
+                        ",(1.0,-0.1,0.0,-0.1,1.0),(1.2,0.0,0.0,-0.2,1.0)"
+                        ",(1.5,-0.1,0.1,-0.2,1.0),(1.6,-0.1,0.0,-0.3,1.0)"
+                        "metarig/spine/spine.001/spine.002/spine.003/shoulder.L/upper_arm.L"
+                        ",(0.0,-0.1,0.7,-0.5,-0.5),(0.5,-0.1,0.8,-0.4,-0.4)"
+                        ",(0.9,-0.1,0.9,-0.4,-0.4),(1.3,-0.1,0.7,-0.5,-0.5)"
+                        ",(1.6,-0.1,0.7,-0.5,-0.5)"
+                        "metarig/spine/spine.001/spine.002/spine.003/shoulder.L/upper_arm.L/"
+                        "forearm.L,(0.0,0.1,-0.1,0.0,1.0),(0.4,0.1,-0.1,0.0,1.0)"
+                        ",(0.8,-0.1,-0.2,0.0,1.0),(1.2,0.0,-0.2,0.0,1.0)"
+                        ",(1.6,0.1,-0.1,0.0,1.0)"
+                        "metarig/spine/spine.001/spine.002/spine.003/shoulder.L/upper_arm.L/"
+                        "forearm.L/hand.L,(0.0,0.1,0.0,-0.1,1.0),(0.5,0.1,0.0,0.0,1.0)"
+                        ",(1.0,0.1,-0.1,0.1,1.0),(1.5,0.1,0.0,0.0,1.0)"
+                        ",(1.6,0.1,0.0,-0.1,1.0)"
+                        "metarig/spine/tail,(0.0,-0.8,0.0,0.0,0.6),(0.2,-0.8,0.0,0.0,0.6)"
+                        ",(0.4,-0.9,-0.2,-0.2,0.5),(0.6,-0.9,-0.2,-0.2,0.4)"
+                        ",(1.1,-0.8,-0.1,-0.1,0.5),(1.6,-0.8,0.0,0.0,0.6)"
+                        "metarig/spine/tail/tail.001,(0.0,0.1,0.0,0.1,1.0)"
+                        ",(0.4,0.1,0.0,0.0,1.0),(0.8,0.0,0.1,-0.2,1.0)"
+                        ",(1.2,0.1,0.0,0.0,1.0),(1.6,0.1,0.0,0.1,1.0)"
+                        "metarig/spine/tail/tail.001/tail.002,(0.0,0.1,0.0,0.2,1.0)"
+                        ",(0.4,0.2,0.0,0.3,0.9),(0.6,0.1,0.0,0.1,1.0)"
+                        ",(0.7,0.1,0.0,-0.1,1.0),(1.0,0.0,0.0,-0.4,0.9)"
+                        ",(1.3,0.1,0.0,-0.1,1.0),(1.5,0.1,0.0,0.1,1.0)"
+                        ",(1.6,0.1,0.0,0.2,1.0)"
+                        "metarig/spine/tail/tail.001/tail.002/tail.003,(0.0,0.0,0.1,0.2,1.0)"
+                        ",(0.4,0.0,0.0,0.5,0.9),(0.6,0.0,0.0,0.5,0.9),(0.7,0.0,0.0,0.4,0.9)"
+                        ",(0.8,0.0,0.0,0.1,1.0),(1.0,0.0,0.0,-0.2,1.0)"
+                        ",(1.1,0.0,0.0,-0.4,0.9),(1.3,0.0,0.0,-0.4,0.9)"
+                        ",(1.4,0.0,0.0,-0.1,1.0),(1.5,0.0,0.1,0.1,1.0)"
+                        ",(1.6,0.0,0.1,0.2,1.0)"
+                    )
+    },
+]
 
 class KeyFrameAgent:
     def initialize_chain(self):
@@ -59,7 +158,22 @@ class KeyFrameAgent:
             },
         )
         prompt_template_for_examples = ChatPromptTemplate.from_messages([
+            ("human",
+                (
+                    "The object you will animate is a **{object}**."\
+                    "Object JSON: {object_json}."\
+                    "Instruction: {instruction}"
+                )
+             ),
+            ("ai", "{animation}")
+        ])
+        few_shot_prompt = FewShotChatMessagePromptTemplate(
+            examples=animation_examples,
+            example_prompt=prompt_template_for_examples
+        )
+        main_prompt = ChatPromptTemplate.from_messages([
             ("system", SYSTEM_MESSAGE),
+            few_shot_prompt,
             ("human",
                 (
                     "The object you will animate is a **{object}**."\
@@ -68,27 +182,9 @@ class KeyFrameAgent:
                 )
              ),
         ])
-        # few_shot_prompt = FewShotChatMessagePromptTemplate(
-        #     examples=city_examples_location,
-        #     example_prompt=prompt_template_for_examples
-        # )
-        
-        # prompt = ChatPromptTemplate.from_messages(
-        #     [
-        #         ("system", SYSTEM_MESSAGE),
-        #         ("human",
-        #         (
-        #             "The object you will animate is a **{object}**."\
-        #             "Object JSON: {object_json}."\
-        #             "Instruction: {instruction}"
-        #         )
-        #         ),
-        #     ]
-        # )
 
-        self.chain = prompt_template_for_examples | llm | StrOutputParser()
+        self.chain = main_prompt | llm | StrOutputParser()
         return self.chain
-
     def invoke_chain(self, input_dict: dict) -> str:
         if not hasattr(self, "chain"):
             raise RuntimeError("Chain is not initialized. Call initialize_chain() first.")
