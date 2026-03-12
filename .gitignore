@@ -5,7 +5,7 @@ new_joints/
 new_joint_vecs/
 pose_data/
 texts/
-
+.venv/
 # Ignore archives everywhere
 *.zip
 *.tar
