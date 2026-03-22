@@ -1,0 +1,17 @@
+model_list:
+  - model_name: gpt-4.1
+    litellm_params:
+      model: github_copilot/gpt-4.1
+  - model_name: gpt-4o
+    litellm_params:
+      model: github_copilot/gpt-4o
+  - model_name: gpt-5-mini
+    litellm_params:
+      model: github_copilot/gpt-5-mini
+  # - model_name: gpt-5.1-codex
+  #   litellm_params:
+  #     model: github_copilot/gpt-5.1-codex
+  # - model_name: gemini-3-pro
+  #   litellm_params:
+  #     model: github_copilot/gemini-3-pro-preview
+      
