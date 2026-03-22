@@ -25,7 +25,7 @@ SYSTEM_MESSAGE = ( \
     "children:[name:Tail,position:(0.0000,0.0196,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Tail_end,position:(0.0000,0.0133,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]],name:TopFlipper.L,position:(-0.0107,0.0087,-0.0087),rotation:(-0.4,0.0,0.3,0.9),children:[name:MidFlipper.L,position:(0.0000,0.0067,0.0000),rotation:(0.0,0.1,0.0,1.0)," \
     "children:[name:BottomFlipper.L,position:(0.0000,0.0043,0.0000),rotation:(0.0,0.0,-0.1,1.0),children:[name:BottomFlipper.L_end,position:(0.0000,0.0076,0.0000),rotation:(0.0,0.0,0.0,1.0)]]],name:TopFlipper.R,position:(0.0092,0.0078,-0.0084),rotation:(-0.4,0.0,-0.3,0.9),children:[name:MidFlipper.R,position:(0.0000,0.0082,0.0000),rotation:(0.1,-0.1,0.1,1.0)," \
     "children:[name:BottomFlipper.R,position:(0.0000,0.0053,0.0000),rotation:(0.0,0.0,0.2,1.0),children:[name:BottomFlipper.R_end,position:(0.0000,0.0072,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]]]]. " \
-    "Root forward direction: (0.00, 1.00, 0.00); right direction: (1.00, 0.00, 0.00); up direction: (0.00, 0.00,-1.00). " \
+    "Root forward direction: (0.00, 1.00, 0.00); right direction: (1.00, 0.00, 0.00); up direction: (0.00, 0.00,-1.00)." \
     "Instruction: create the swim animation for the whale: " \
     "Armature,[0.00,0.00,0.00,0.00],[2.79,0.00,0.00,0.00] " \
     "Armature,(0.0,-0.7,0.0,0.0,0.7),(2.8,-0.7,0.0,0.0,0.7) " \
@@ -147,11 +147,21 @@ animation_examples = [
 
 class KeyFrameAgent:
     def initialize_chain(self):
+        # llm = init_chat_model(
+        #     model="gpt-oss-120b:free",
+        #     model_provider="openai",
+        #     base_url="https://openrouter.ai/api/v1",
+        #     api_key=getenv("OPENROUTER_API_KEY"),
+        #     default_headers={
+        #         # "HTTP-Referer": getenv("YOUR_SITE_URL"),
+        #         # "X-OpenRouter-Title": getenv("YOUR_SITE_NAME"),
+        #     },
+        # )
         llm = init_chat_model(
-            model="gpt-oss-120b:free",
+            model="gpt-5-mini",
             model_provider="openai",
-            base_url="https://openrouter.ai/api/v1",
-            api_key=getenv("OPENROUTER_API_KEY"),
+            base_url="http://localhost:4000/v1/",
+            api_key="nothing",
             default_headers={
                 # "HTTP-Referer": getenv("YOUR_SITE_URL"),
                 # "X-OpenRouter-Title": getenv("YOUR_SITE_NAME"),
@@ -193,6 +203,20 @@ class KeyFrameAgent:
 
 keyframe = KeyFrameAgent()
 keyframe.initialize_chain()
+response = keyframe.invoke_chain(
+    {
+                "object": "whale",
+                "object_json": (
+                    "name:Armature,position:(0.0000,0.0000,0.0000),rotation:(-0.7,0.0,0.0,0.7),children:[name:Root,position:(0.0000,0.0168,0.0141),rotation:(0.7,0.0,0.0,0.7),children:[name:Head,position:(0.0000,0.0062,0.0198),rotation:(0.7,0.0,0.0,0.7),children:[name:Head_end,position:(0.0000,0.0107,0.0000),rotation:(0.0,0.0,0.0,1.0)],"
+                    "name:Spine1,position:(0.0000,0.0050,0.0154),rotation:(-0.7,0.0,0.0,0.7),children:[name:Spine2,position:(0.0000,0.0156,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine3,position:(0.0000,0.0166,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine4,position:(0.0000,0.0172,0.0000),rotation:(-0.1,0.0,0.0,1.0),"
+                    "children:[name:Tail,position:(0.0000,0.0196,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Tail_end,position:(0.0000,0.0133,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]],name:TopFlipper.L,position:(-0.0107,0.0087,-0.0087),rotation:(-0.4,0.0,0.3,0.9),children:[name:MidFlipper.L,position:(0.0000,0.0067,0.0000),rotation:(0.0,0.1,0.0,1.0),"
+                    "children:[name:BottomFlipper.L,position:(0.0000,0.0043,0.0000),rotation:(0.0,0.0,-0.1,1.0),children:[name:BottomFlipper.L_end,position:(0.0000,0.0076,0.0000),rotation:(0.0,0.0,0.0,1.0)]]],name:TopFlipper.R,position:(0.0092,0.0078,-0.0084),rotation:(-0.4,0.0,-0.3,0.9),children:[name:MidFlipper.R,position:(0.0000,0.0082,0.0000),rotation:(0.1,-0.1,0.1,1.0),"
+                    "children:[name:BottomFlipper.R,position:(0.0000,0.0053,0.0000),rotation:(0.0,0.0,0.2,1.0),children:[name:BottomFlipper.R_end,position:(0.0000,0.0072,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]]]]"
+                ),
+                "instruction": "create the jumping out of the water animation for the whale",
+            }
+)
+print(response)
 response = keyframe.invoke_chain(
     {
                 "object": "racoon",
