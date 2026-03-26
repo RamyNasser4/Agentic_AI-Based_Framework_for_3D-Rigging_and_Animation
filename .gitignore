@@ -6,6 +6,8 @@ new_joint_vecs/
 pose_data/
 texts/
 .venv/
+__pycache__/
+.vscode/
 # Ignore archives everywhere
 *.zip
 *.tar
