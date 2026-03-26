@@ -7,8 +7,10 @@ import re
 
 try:
     import bpy as _bpy  # type: ignore
+    from mathutils import Vector  # type: ignore
 except ModuleNotFoundError:
     _bpy = None
+    Vector = None
 
 
 QuaternionXYZW = Tuple[float, float, float, float]
@@ -252,8 +254,24 @@ class BlenderExecutor:
             return
 
         if track.channel == "location":
+            root_bone = None
+            if getattr(target, "type", None) == "ARMATURE" and getattr(target, "pose", None) is not None:
+                root_bone = target.pose.bones.get("root")
+                if root_bone is None:
+                    root_bone = next(
+                        (pose_bone for pose_bone in target.pose.bones if pose_bone.parent is None),
+                        None,
+                    )
+
             for keyframe in track.keyframes:
-                target.location = keyframe.values
+                if root_bone is not None:
+                    if Vector is None:
+                        raise RuntimeError("mathutils.Vector is unavailable; run this inside Blender.")
+                    local_vec = Vector(keyframe.values)
+                    world_vec = root_bone.matrix.to_3x3() @ local_vec
+                    target.location = world_vec
+                else:
+                    target.location = keyframe.values
                 target.keyframe_insert(
                     data_path="location",
                     frame=self._time_to_frame(keyframe.time_sec, fps, frame_start),
@@ -275,22 +293,15 @@ class BlenderExecutor:
 
 if __name__ == "__main__":
     sample_output = """
-    metarig,[0.0,0.0,0.0,0.0],[1.0,0.5,0.0,0.0]  
-    metarig/spine,(0.0,0.7,0.0,0.0,0.7),(0.5,0.75,0.0,0.0,0.65),(1.0,0.7,0.0,0.0,0.7)
-    metarig/spine/spine.001,(0.0,0.7,0.0,0.0,0.7),(0.5,0.75,0.0,0.0,0.65),(1.0,0.7,0.0,0.0,0.7)
-    metarig/spine/spine.001/spine.002/spine.003/spine.006,(0.0,0.0,0.0,0.0,1.0),(0.5,0.0,0.0,0.0,1.0),(1.0,0.0,0.0,0.0,1.0)
-    metarig/spine/spine.001/spine.002/spine.003/spine.006/ear.L,(0.0,0.0,0.0,0.0,1.0),(0.5,0.0,0.0,0.1,0.99),(1.0,0.0,0.0,0.0,1.0)
-    metarig/spine/spine.001/spine.002/spine.003/spine.006/ear.R,(0.0,0.0,0.0,0.0,1.0),(0.5,0.0,0.0,-0.1,0.99),(1.0,0.0,0.0,0.0,1.0)
-    metarig/thigh.L,(0.0,0.2,0.0,0.0,0.98),(0.5,0.4,0.0,0.0,0.90),(1.0,0.2,0.0,0.0,0.98)
-    metarig/thigh.L/shin.L,(0.0,0.0,0.0,0.0,1.0),(0.5,-0.2,0.0,0.0,0.90),(1.0,0.0,0.0,0.0,1.0)
-    metarig/thigh.L/shin.L/foot.L,(0.0,0.0,0.0,0.0,1.0),(0.5,0.1,0.0,0.0,0.95),(1.0,0.0,0.0,0.0,1.0)     
-    metarig/thigh.R,(0.0,0.0,0.0,0.0,0.98),(0.5,0.2,0.0,0.0,0.98),(1.0,0.0,0.0,0.0,0.98)
-    metarig/thigh.R/shin.R,(0.0,0.0,0.0,0.0,1.0),(0.5,-0.2,0.0,0.0,0.90),(1.0,0.0,0.0,0.0,1.0)
-    metarig/thigh.R/shin.R/foot.R,(0.0,0.0,0.0,0.0,1.0),(0.5,0.1,0.0,0.0,0.95),(1.0,0.0,0.0,0.0,1.0)     
-    metarig/tail,(0.0,0.0,0.0,0.0,1.0),(0.5,0.0,0.1,0.0,0.98),(1.0,0.0,0.0,0.0,1.0)
-    metarig/tail/tail.001,(0.0,0.0,0.0,0.0,1.0),(0.5,0.0,0.1,0.0,0.98),(1.0,0.0,0.0,0.0,1.0)
-    metarig/tail/tail.001/tail.002,(0.0,0.0,0.0,0.0,1.0),(0.5,0.0,0.1,0.0,0.98),(1.0,0.0,0.0,0.0,1.0)    
-    metarig/tail/tail.001/tail.002/tail.003,(0.0,0.0,0.0,0.0,1.0),(0.5,0.0,0.1,0.0,0.98),(1.0,0.0,0.0,0.0,1.0)
+    SMPLX-lh-male,(0.0,1.0,0.0,0.0,0.0),(2.0,1.0,0.0,0.0,0.0)
+    SMPLX-lh-male/root,(0.0,0.0,0.0,-0.7,-0.7),(2.0,0.0,0.0,-0.7,-0.7)
+    SMPLX-lh-male/root/pelvis,(0.0,1.0,0.0,0.0,0.0),(2.0,1.0,0.0,0.0,0.0)
+    SMPLX-lh-male/root/pelvis/left_hip/left_knee,(0.0,0.99,0.12,0.0,0.0),(2.0,0.99,0.12,0.0,0.0)
+    SMPLX-lh-male/root/pelvis/right_hip/right_knee,(0.0,0.99,0.12,0.0,0.0),(2.0,0.99,0.12,0.0,0.0)
+    SMPLX-lh-male/root/pelvis/spine1,(0.0,1.0,0.0,0.0,0.0),(2.0,1.0,0.0,0.0,0.0)
+    SMPLX-lh-male/root/pelvis/spine1/spine2,(0.0,1.0,0.0,0.0,0.0),(2.0,1.0,0.0,0.0,0.0)
+    SMPLX-lh-male/root/pelvis/spine1/spine2/spine3,(0.0,1.0,0.0,0.0,0.0),(2.0,1.0,0.0,0.0,0.0)
+    SMPLX-lh-male/root/pelvis/spine1/spine2/spine3/neck/head,(0.0,1.0,0.0,0.0,0.0),(2.0,1.0,0.0,0.0,0.0)
     """.strip()
 
     executor = BlenderExecutor()
