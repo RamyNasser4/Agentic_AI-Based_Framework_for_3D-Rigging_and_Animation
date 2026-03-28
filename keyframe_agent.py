@@ -10,7 +10,7 @@ SYSTEM_MESSAGE = ( \
     "You're an animator who will be provided the joints on a rigged 3D model, and you have to rotate them to produce the requested animation. " \
     "The joints will be given as a JSON string that outlines the object hierarchy. " \
     "You need to output one line of string each time. I will give you the starting point of each joint, which specifies the joint name and its initial position/rotation. " \
-    "You need to generate a line to fill out a time series for that joint then a new line for the next joint. " \
+    "You need to generate a line to fill out a time series for that joint then a new line for the next joint." \
     "- If a line contains \"[]\", it specifies the root motion for the animation. " \
     "Each vector in the format of [t,x,y,z] specifies a key frame. " \
     "\"t\" is the time stamp for the key, and \"x\", \"y\", \"z\" give the x,y,z components for the position of the object root. " \
@@ -18,7 +18,9 @@ SYSTEM_MESSAGE = ( \
     "- If a line contains vectors enclosed in \"()\", it represents the time series for the quaternions. " \
     "Each vector in the format (t,x,y,z,w) specifies a key frame for the animation. " \
     "\"t\" is the time stamp for the key, and \"x\", \"y\", \"z\", \"w\" give the x,y,z,w components for the rotation quaternion, respectively. " \
+    "Each vector should contain 4 values if it's enclosed in a [] and 5 values if it's enclosed in ()" \
     "For example, Armature/Root/Head,(0.0,0.7,0.0,0.0,0.7),(1.3,0.6,0.0,0.0,0.8) means that the joint \"Armature/Root/Head\" has rotation (0.7,0.0,0.0,0.7) at time 0.0, and rotation (0.6,0.0,0.0,0.8) at time 1.3. " \
+    "You will be given the start time of the animation." \
     "# Example: The object you will animate is a **whale**. " \
     "Object JSON: name:Armature,position:(0.0000,0.0000,0.0000),rotation:(-0.7,0.0,0.0,0.7),children:[name:Root,position:(0.0000,0.0168,0.0141),rotation:(0.7,0.0,0.0,0.7),children:[name:Head,position:(0.0000,0.0062,0.0198),rotation:(0.7,0.0,0.0,0.7),children:[name:Head_end,position:(0.0000,0.0107,0.0000),rotation:(0.0,0.0,0.0,1.0)]," \
     "name:Spine1,position:(0.0000,0.0050,0.0154),rotation:(-0.7,0.0,0.0,0.7),children:[name:Spine2,position:(0.0000,0.0156,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine3,position:(0.0000,0.0166,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine4,position:(0.0000,0.0172,0.0000),rotation:(-0.1,0.0,0.0,1.0)," \
@@ -27,6 +29,7 @@ SYSTEM_MESSAGE = ( \
     "children:[name:BottomFlipper.R,position:(0.0000,0.0053,0.0000),rotation:(0.0,0.0,0.2,1.0),children:[name:BottomFlipper.R_end,position:(0.0000,0.0072,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]]]]. " \
     "Root forward direction: (0.00, 1.00, 0.00); right direction: (1.00, 0.00, 0.00); up direction: (0.00, 0.00,-1.00)." \
     "Instruction: create the swim animation for the whale: " \
+    "Start time: 0.0s." \
     "Armature,[0.00,0.00,0.00,0.00],[2.79,0.00,0.00,0.00] " \
     "Armature,(0.0,-0.7,0.0,0.0,0.7),(2.8,-0.7,0.0,0.0,0.7) " \
     "Armature/Root,(0.0,0.7,0.0,0.0,0.7),(2.8,0.7,0.0,0.0,0.7) " \
@@ -97,6 +100,7 @@ animation_examples = [
                     "Root forward direction: (0.00, 1.00, 0.00); right direction: (1.00, 0.00, 0.00); up direction: (0.00, 0.00,-1.00)."
                 ),
         "instruction": "idle while moving head up and down",
+        "start_time": "0.0s",
         "animation": (
                         "metarig,[0.00,0.00,0.00,0.00],[1.56,0.00,0.00,0.00]"
                         "metarig/spine/spine.001/spine.002/spine.003/spine"
@@ -174,6 +178,7 @@ class KeyFrameAgent:
                     "The object you will animate is a **{object}**."\
                     "Object JSON: {object_json}."\
                     "Instruction: {instruction}"
+                    "start time: {start_time}"
                 )
              ),
             ("ai", "{animation}")
@@ -189,7 +194,8 @@ class KeyFrameAgent:
                 (
                     "The object you will animate is a **{object}**."\
                     "Object JSON: {object_json}."\
-                    "Instruction: {instruction}"
+                    "Instruction: {instruction}."\
+                    "Start time: {start_time}."
                 )
              ),
         ])
@@ -211,7 +217,8 @@ response = keyframe.invoke_chain(
                     "name:SMPLX-lh-male,position:(6.7,-2.4,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:root,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:pelvis,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:left_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:left_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:left_ankle,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:left_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:right_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:right_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:right_ankle,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:right_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:spine1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:neck,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:head,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:jaw,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:left_eye_smplhf,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:right_eye_smplhf,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]],name:left_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:left_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:left_elbow,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:left_wrist,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:left_index1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.2,1.0),children:[name:left_index2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.4,0.9),children:[name:left_index3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]],name:left_middle1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.3,1.0),children:[name:left_middle2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.3,0.9),children:[name:left_middle3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.2,1.0)]],name:left_pinky1,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,-0.3,0.9),children:[name:left_pinky2,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,-0.3,1.0),children:[name:left_pinky3,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0)]],name:left_ring1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.3,0.9),children:[name:left_ring2,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,-0.3,0.9),children:[name:left_ring3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.2,1.0)]],name:left_thumb1,position:(0.0,0.0,0.0),rotation:(0.4,0.1,0.0,0.9),children:[name:left_thumb2,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0),children:[name:left_thumb3,position:(0.0,0.0,0.0),rotation:(0.3,0.0,-0.1,1.0)]]]]]],name:right_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:right_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:right_elbow,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:right_wrist,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:right_index1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.2,1.0),children:[name:right_index2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.4,0.9),children:[name:right_index3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]],name:right_middle1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.3,1.0),children:[name:right_middle2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.3,0.9),children:[name:right_middle3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.2,1.0)]],name:right_pinky1,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.3,0.9),children:[name:right_pinky2,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,0.3,1.0),children:[name:right_pinky3,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0)]],name:right_ring1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.3,0.9),children:[name:right_ring2,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,0.3,0.9),children:[name:right_ring3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.2,1.0)]],name:right_thumb1,position:(0.0,0.0,0.0),rotation:(0.4,-0.1,0.0,0.9),children:[name:right_thumb2,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0),children:[name:right_thumb3,position:(0.0,0.0,0.0),rotation:(0.3,0.0,0.1,1.0)]]]]]]]]]]]]"
                     "Root forward direction: (0.0, 0.0, 1.0); right direction: (-1.0, 0.0, 0.0); up direction: (0.0, 1.0, 0.0)"
                 ),
-                "instruction": "Move root forward; rotate left_hip forward; bend left_knee backward; lift left_ankle; move left_foot forward; extend right_hip backward; keep right_knee slightly bent; rotate right_shoulder forward; rotate left_shoulder backward.",
+                "instruction": "run forward",
+                "start_time": "2.0s",
             }
 )
 # response = keyframe.invoke_chain(
