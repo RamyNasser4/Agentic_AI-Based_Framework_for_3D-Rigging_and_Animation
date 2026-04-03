@@ -1,6 +1,7 @@
 # Testing the Gemini API with a simple prompt to explain how AI works.
 from os import getenv
 from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 from langchain.chat_models import init_chat_model
 from dotenv import load_dotenv
 
@@ -13,10 +14,17 @@ PLANNER_SYSTEM_PROMPT = """You are an animation planner. Given a user's request,
 - Read the user's request carefully and produce a step-by-step plan.
 - Output must be a series of numbered steps (e.g., Step 1:, Step 2:).
 - Each step must be on a single line, followed by a newline for the next step.
-- Each step consists of an action sentence for each necessary joint, separated by semicolons (e.g., "Move root forward; bend left_knee; rotate spine1.").
+- Each step consists of action phrases for each necessary joint, separated by semicolons.
+- Every joint action must use simple directional language with exact numeric values (e.g., "rotate left_hip backward 30 degrees", "move root forward").
+- Only include joints that are actively moving in that step. Never mention a joint if its value is 0 or unchanged.
 - Explicitly use the exact joint names provided in the object JSON.
-- Use direction vectors (e.g., (0, 1, 0)) when describing root translational or rotational movement based on the provided root directions.
+- Do not use vague language like "slightly", "a bit", or "gently" — always use exact numeric values for rotations.
 - Do not output any introductory or concluding text. Generate output ONLY.
+- Do not use adverbs or descriptive keywords like 'rapidly', 'smoothly', 'quickly', 'slowly', or 'continuously' — use only directional language and exact numeric values.
+
+# Output format example
+Step 1: Move root forward; rotate left_hip backward 30 degrees; rotate right_hip forward 30 degrees;
+Step 2: Move root forward; rotate right_hip backward 30 degrees; rotate left_hip forward 30 degrees;
 """
 
 # Updated few shots with the specific step-by-step formatting
@@ -68,11 +76,10 @@ few_shots = [
         ),
         "user_prompt": "Animate the raccoon standing still while nodding its head up and down.",
         "plan": (
-            "Step 1: Keep metarig stationary; stabilize spine, pelvis.L, and pelvis.R; maintain tail in default rotation.\n"
-            "Step 2: Rotate spine.006 forward to lower the head; apply slight forward wobble to ear.L and ear.R; apply subtle downward rotation to tail.001.\n"
-            "Step 3: Rotate spine.006 backward to raise the head; apply slight backward wobble to ear.L and ear.R; reverse subtle rotation on tail.001.\n"
-            "Step 4: Repeat rotation of spine.006 forward; continue passive motion on ear.L and ear.R; maintain idle sway on tail.\n"
-            "Step 5: Return spine.006 to upright position; settle ear.L and ear.R; keep thigh.L, shin.L, thigh.R, and shin.R stationary."
+            "Step 1: Rotate spine.006 forward 30 degrees; rotate ear.L forward 10 degrees; rotate ear.R forward 10 degrees; rotate tail.001 downward 5 degrees.\n"
+            "Step 2: Rotate spine.006 backward 30 degrees; rotate ear.L backward 10 degrees; rotate ear.R backward 10 degrees; rotate tail.001 upward 5 degrees.\n"
+            "Step 3: Rotate spine.006 forward 30 degrees; rotate ear.L forward 10 degrees; rotate ear.R forward 10 degrees; rotate tail.001 downward 5 degrees.\n"
+            "Step 4: Rotate spine.006 backward 30 degrees; rotate ear.L backward 10 degrees; rotate ear.R backward 10 degrees; rotate tail.001 upward 5 degrees.\n"
         ),
     },
     {
@@ -87,11 +94,10 @@ few_shots = [
         ),
         "user_prompt": "Create a swim animation for the whale.",
         "plan": (
-            "Step 1: Move Armature forward along (0, 1, 0); keep Root stable; prepare Spine1 and Spine2 for downward wave rotation.\n"
-            "Step 2: Move Armature forward along (0, 1, 0); rotate Spine1 and Spine2 downward; rotate Head slightly upward; rotate TopFlipper.L and TopFlipper.R backward.\n"
-            "Step 3: Move Armature forward along (0, 1, 0); rotate Spine3 and Spine4 downward; rotate Spine1 and Spine2 upward; rotate Tail downward.\n"
-            "Step 4: Move Armature forward along (0, 1, 0); rotate Spine3 and Spine4 upward; rotate Tail upward; rotate TopFlipper.L and TopFlipper.R forward.\n"
-            "Step 5: Continue continuous Armature forward motion along (0, 1, 0); cycle spine bones and Tail in cascading wave; cycle TopFlipper.L and TopFlipper.R to balance motion."
+            "Step 1: Move Armature forward; rotate Spine1 downward 20 degrees; rotate Spine2 downward 15 degrees; rotate Head upward 10 degrees; rotate TopFlipper.L backward 20 degrees; rotate TopFlipper.R backward 20 degrees.\n"
+            "Step 2: Move Armature forward; rotate Spine3 downward 20 degrees; rotate Spine4 downward 15 degrees; rotate Spine1 upward 20 degrees; rotate Spine2 upward 15 degrees; rotate Tail downward 25 degrees.\n"
+            "Step 3: Move Armature forward; rotate Spine3 upward 20 degrees; rotate Spine4 upward 15 degrees; rotate Tail upward 25 degrees; rotate TopFlipper.L forward 20 degrees; rotate TopFlipper.R forward 20 degrees.\n"
+            "Step 4: Move Armature forward; rotate Spine1 downward 20 degrees; rotate Spine2 downward 15 degrees; rotate Spine3 upward 20 degrees; rotate Tail downward 25 degrees; rotate TopFlipper.L backward 20 degrees; rotate TopFlipper.R backward 20 degrees.\n"
         )
     },
     {
@@ -99,12 +105,12 @@ few_shots = [
         "object_json": "",
         "user_prompt": "Animate a character jumping over an obstacle.",
         "plan": (
-            "Step 1: Move root forward along (0, 1, 0); bend left_knee and right_knee; lower pelvis; rotate spine1 forward; swing left_shoulder and right_shoulder backward.\n"
-            "Step 2: Move root forward and upward along (0, 1, 1); extend left_knee and right_knee rapidly; raise pelvis; straighten spine1; swing left_shoulder and right_shoulder forward.\n"
-            "Step 3: Move root forward along (0, 1, 0) at peak vertical height; tuck left_knee and right_knee slightly upward; stabilize pelvis; keep head facing forward.\n"
-            "Step 4: Move root forward and downward along (0, 1, -1); extend left_knee and right_knee to prepare for landing; brace spine1 and spine2.\n"
-            "Step 5: Move root forward to ground level; bend left_knee and right_knee deeply to absorb impact; lower pelvis; drop left_shoulder and right_shoulder.\n"
-            "Step 6: Center pelvis over feet; extend left_knee and right_knee to standing position; align spine1 upright."
+            "Step 1: Move root forward; rotate left_knee forward 40 degrees; rotate right_knee forward 40 degrees; move pelvis downward; rotate spine1 forward 15 degrees; rotate left_shoulder backward 20 degrees; rotate right_shoulder backward 20 degrees.\n"
+            "Step 2: Move root forward and upward; rotate left_knee backward 40 degrees; rotate right_knee backward 40 degrees; move pelvis upward; rotate spine1 backward 15 degrees; rotate left_shoulder forward 20 degrees; rotate right_shoulder forward 20 degrees.\n"
+            "Step 3: Move root forward; rotate left_knee upward 20 degrees; rotate right_knee upward 20 degrees.\n"
+            "Step 4: Move root forward and downward; rotate left_knee backward 30 degrees; rotate right_knee backward 30 degrees; rotate spine1 forward 10 degrees; rotate spine2 forward 10 degrees.\n"
+            "Step 5: Move root downward; rotate left_knee forward 50 degrees; rotate right_knee forward 50 degrees; move pelvis downward; rotate left_shoulder downward 15 degrees; rotate right_shoulder downward 15 degrees.\n"
+            "Step 6: Rotate left_knee backward 50 degrees; rotate right_knee backward 50 degrees; move pelvis upward; rotate spine1 upward 10 degrees.\n"
         )
     },
     {
@@ -112,10 +118,10 @@ few_shots = [
         "object_json": "",
         "user_prompt": "Animate a flag waving in the wind.",
         "plan": (
-            "Step 1: Keep pole_root stationary; initiate slight rotation on flag_bone_1 along the wind direction.\n"
-            "Step 2: Hold pole_root stationary; rotate flag_bone_1 further; initiate offset rotation on flag_bone_2.\n"
-            "Step 3: Rotate flag_bone_1 back toward center; rotate flag_bone_2 further; initiate offset rotation on flag_bone_3.\n"
-            "Step 4: Cycle flag_bone_1, flag_bone_2, flag_bone_3 in alternating wave pattern to simulate continuous wind ripples."
+            "Step 1: Rotate flag_bone_1 sideward 10 degrees.\n"
+            "Step 2: Rotate flag_bone_1 sideward 15 degrees; rotate flag_bone_2 sideward 10 degrees.\n"
+            "Step 3: Rotate flag_bone_1 backward 10 degrees; rotate flag_bone_2 sideward 15 degrees; rotate flag_bone_3 sideward 10 degrees.\n"
+            "Step 4: Rotate flag_bone_1 sideward 15 degrees; rotate flag_bone_2 backward 10 degrees; rotate flag_bone_3 sideward 15 degrees.\n"
         )
     },
     {
@@ -123,11 +129,11 @@ few_shots = [
         "object_json": "",
         "user_prompt": "Make a character pick up an object from a table.",
         "plan": (
-            "Step 1: Keep root stationary; rotate pelvis slightly forward; bend spine1 and spine2 forward; keep left_arm relaxed.\n"
-            "Step 2: Continue bending spine1 forward; rotate right_shoulder forward and upward; extend right_elbow toward object; open right_thumb and right_index.\n"
-            "Step 3: Hold spine1 position; fully extend right_elbow; close right_thumb and right_index around object.\n"
-            "Step 4: Rotate right_shoulder backward; bend right_elbow to lift object; rotate spine1 and spine2 backward to upright position.\n"
-            "Step 5: Center pelvis; align spine1 upright; keep right_elbow bent holding object securely."
+            "Step 1: Rotate pelvis forward 10 degrees; rotate spine1 forward 20 degrees; rotate spine2 forward 15 degrees.\n"
+            "Step 2: Rotate spine1 forward 30 degrees; rotate right_shoulder forward 40 degrees; rotate right_shoulder upward 20 degrees; rotate right_elbow forward 30 degrees; rotate right_thumb outward 20 degrees; rotate right_index outward 20 degrees.\n"
+            "Step 3: Rotate right_elbow forward 50 degrees; rotate right_thumb inward 20 degrees; rotate right_index inward 20 degrees.\n"
+            "Step 4: Rotate right_shoulder backward 40 degrees; rotate right_elbow backward 30 degrees; rotate spine1 backward 30 degrees; rotate spine2 backward 15 degrees.\n"
+            "Step 5: Rotate pelvis backward 10 degrees; rotate right_elbow inward 30 degrees.\n"
         )
     },
     {
@@ -135,10 +141,9 @@ few_shots = [
         "object_json": "",
         "user_prompt": "Animate a rocket launching into the sky.",
         "plan": (
-            "Step 1: Keep rocket_root stationary; trigger initial ignition particle effect.\n"
-            "Step 2: Move rocket_root slightly downward to simulate squash and anticipation; maintain stable vertical orientation.\n"
-            "Step 3: Move rocket_root rapidly upward along (0, 0, 1); keep rotation strictly vertical.\n"
-            "Step 4: Continue moving rocket_root upward along (0, 0, 1) with increasing speed; rotate rocket_root slightly toward (0, 1, 0) for trajectory arc."
+            "Step 1: Move rocket_root downward 5 degrees.\n"
+            "Step 2: Move rocket_root upward 20 degrees.\n"
+            "Step 3: Move rocket_root upward 40 degrees; rotate rocket_root forward 10 degrees.\n"
         )
     },
 ]
@@ -174,14 +179,23 @@ FREE_MODELS = [
 ]
 
 def get_llm(model: str):
+    # return init_chat_model(
+    #     model=model,
+    #     model_provider="openai",
+    #     base_url="https://openrouter.ai/api/v1",
+    #     api_key=getenv("OPENROUTER_API_KEY"),
+    #     temperature=0,
+    # )
     return init_chat_model(
-        model=model,
-        model_provider="openai",
-        base_url="https://openrouter.ai/api/v1",
-        api_key=getenv("OPENROUTER_API_KEY"),
-        temperature=0,
-    )
-
+                model="gpt-5-mini",
+                model_provider="openai",
+                base_url="http://localhost:4000/v1/",
+                api_key="nothing",
+                default_headers={
+                    # "HTTP-Referer": getenv("YOUR_SITE_URL"),
+                    # "X-OpenRouter-Title": getenv("YOUR_SITE_NAME"),
+                },
+            )
 example_prompt = ChatPromptTemplate.from_messages([
     ("human", "Object: **{object}**. Object JSON: {object_json}. Request: {user_prompt}."),
     ("ai", "{plan}"),
@@ -203,24 +217,75 @@ prompt_template = ChatPromptTemplate.from_messages([
     )),
 ])
 
-# Auto-fallback logic
+class PlannerAgent:
+    def __init__(self, models=None):
+        self.models = models or FREE_MODELS
+        self.chain = None
+        self.working_model = None
+
+    def _build_chain(self, model: str):
+        llm = get_llm(model)
+        return prompt_template | llm | StrOutputParser()
+
+    def initialize_chain(self, model: str | None = None):
+        if model is None:
+            self.chain = None
+            self.working_model = None
+            return
+
+        self.chain = self._build_chain(model)
+        self.working_model = model
+
+    def invoke_chain(self, input_dict: dict) -> str:
+        if self.chain is not None:
+            try:
+                return self.chain.invoke(input_dict)
+            except Exception as error:
+                print(f"{self.working_model} failed: {str(error)[:60]}")
+                self.chain = None
+                self.working_model = None
+
+        for model in self.models:
+            try:
+                self.chain = self._build_chain(model)
+                self.working_model = model
+                response = self.chain.invoke(input_dict)
+                print(f"Working model: {model}")
+                return response
+            except Exception as error:
+                print(f"{model} failed: {str(error)[:60]}")
+                self.chain = None
+                self.working_model = None
+                continue
+
+        return "All models failed."
+
+    @staticmethod
+    def get_example_object_json(object_name: str) -> str:
+        for example in few_shots:
+            if example["object"].lower() == object_name.lower():
+                return example["object_json"]
+        raise ValueError(f"No example object_json found for '{object_name}'.")
+
+
 def run_llm(object_name, object_json, user_prompt):
-    for model in FREE_MODELS:
-        try:
-            llm = get_llm(model)
-            chain = prompt_template | llm
+    planner = PlannerAgent()
+    return planner.invoke_chain({
+        "object": object_name,
+        "object_json": object_json,
+        "user_prompt": user_prompt,
+    })
 
-            response = chain.invoke({
-                "object": object_name,
-                "object_json": object_json,
-                "user_prompt": user_prompt,
-            })
 
-            print(f"Working model: {model}")
-            return response.content
+if __name__ == "__main__":
+    planner = PlannerAgent()
+    planner.initialize_chain()
 
-        except Exception as e:
-            print(f"{model} failed: {str(e)[:60]}")
-            continue
+    whale_object_json = planner.get_example_object_json("whale")
+    whale_plan = planner.invoke_chain({
+        "object": "whale",
+        "object_json": whale_object_json,
+        "user_prompt": "Create tilt tail animation",
+    })
 
-    return "All models failed."
+    print(whale_plan)
