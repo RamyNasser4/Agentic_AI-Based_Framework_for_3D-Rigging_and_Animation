@@ -142,18 +142,16 @@ class GENERATOR_OT_generate(bpy.types.Operator):
 
         try:
             print("[Generator] Stage 2: Generating animation plan.")
-            #animation_plan = run_llm(object_name, object_json, user_prompt)
-            #context.scene.gen_output = str(animation_plan)
-            #print("[Generator] Animation plan generated:")
-            #print(animation_plan)
+            animation_plan = run_llm(object_name, object_json, user_prompt)
+            context.scene.gen_output = str(animation_plan)
+            print("[Generator] Animation plan generated:")
+            print(animation_plan)
         except Exception as error:
             print(f"[Generator] Animation planning failed: {error}")
             self.report({'ERROR'}, f"Animation planning failed: {error}")
             return {'CANCELLED'}
 
-        #plan_steps = split_animation_plan(animation_plan)
-        plan_steps = ["Move root forward along (0, 0, 1); rotate left_hip backward; rotate left_knee forward; rotate right_hip forward; rotate right_knee forward;",
-                      "Move root forward along (0, 0, 1); rotate left_hip forward; rotate left_knee backward; rotate right_hip backward; rotate right_knee backward; "]
+        plan_steps = split_animation_plan(animation_plan)
         if not plan_steps:
             print("[Generator] Planner returned no executable steps.")
             self.report({'WARNING'}, "Animation planner returned no steps")

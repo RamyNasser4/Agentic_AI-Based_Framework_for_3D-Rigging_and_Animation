@@ -8,6 +8,9 @@ model_list:
   - model_name: gpt-5-mini
     litellm_params:
       model: github_copilot/gpt-5-mini
+  # - model_name: gpt-5.2
+  #   litellm_params:
+  #     model: github_copilot/gpt-5.2
   # - model_name: gpt-5.1-codex
   #   litellm_params:
   #     model: github_copilot/gpt-5.1-codex
