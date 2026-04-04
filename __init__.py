@@ -21,9 +21,13 @@ import textwrap
 # ---------------------------------------------------
 
 def dropdown_items(self, context):
-    return [
-        
-    ]
+    items = []
+
+    for obj in context.scene.objects:
+        if obj.type == 'MESH' or obj.type == 'ARMATURE':
+            items.append((obj.name, obj.name, ""))
+
+    return items
 
 
 # ---------------------------------------------------
