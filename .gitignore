@@ -8,6 +8,9 @@ texts/
 .venv/
 __pycache__/
 .vscode/
+racoon&whaleRigs1.blend
+racoon&whaleRigs.blend
+
 # Ignore archives everywhere
 *.zip
 *.tar
@@ -23,3 +26,4 @@ __pycache__/
 # BUT keep only root-level Python and notebooks
 !/*.py
 !/*.ipynb
+racoon&whaleRigs.blend

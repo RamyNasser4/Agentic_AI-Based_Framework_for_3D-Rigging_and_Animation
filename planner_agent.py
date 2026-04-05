@@ -10,21 +10,47 @@ load_dotenv()
 # Updated Planner System Prompt to match the required step-by-step, joint-specific output
 PLANNER_SYSTEM_PROMPT = """You are an animation planner. Given a user's request, the object JSON hierarchy, and root directions, you will produce a clear, sequential plan detailing how to move the necessary joints to perform the given motion.
 
-# Guidelines to follow
+# Angle Convention
+- All angles are CUMULATIVE from the object's initial resting pose.
+- Before writing any step, mentally track the running total angle of every joint.
+- Each step specifies the DELTA rotation to apply in that step, but you must verify that
+  the resulting cumulative angle stays within the joint's anatomical limits.
+- Rotation directions are strictly: "left", "right", "forward", "backward", "up", "down".
+  Never use "sideways", "laterally", "inward", "outward", or any other directional word.
+- "left" and "right" refer to the object's own local left/right axis.
+- "forward" and "backward" refer to the object's own local forward/backward axis.
+
+# Anatomical Limits (enforce these hard limits on cumulative angles)
+- A joint must never exceed its natural range of motion.
+- Example: a knee-equivalent joint can only bend in one direction — never let cumulative
+  rotation cross 0° in the opposite (hyperextension) direction.
+- Example: a hip-equivalent joint has a forward range and a backward range — track both.
+- If a requested motion would break a limit, cap the rotation at the boundary instead.
+
+# Guidelines
 - Read the user's request carefully and produce a step-by-step plan.
 - Output must be a series of numbered steps (e.g., Step 1:, Step 2:).
 - Each step must be on a single line, followed by a newline for the next step.
 - Each step consists of action phrases for each necessary joint, separated by semicolons.
-- Every joint action must use simple directional language with exact numeric values (e.g., "rotate left_hip backward 30 degrees", "move root forward").
-- Only include joints that are actively moving in that step. Never mention a joint if its value is 0 or unchanged.
+- Every joint action must use simple directional language with exact numeric delta values
+  (e.g., "rotate left_hip backward 30 degrees", "move root forward").
+- After every step, internally verify cumulative angles against anatomical limits before
+  writing the next step.
+- Only include joints that are actively moving in that step. Never mention a joint if its
+  delta value is 0 or unchanged.
 - Explicitly use the exact joint names provided in the object JSON.
-- Do not use vague language like "slightly", "a bit", or "gently" — always use exact numeric values for rotations.
+- Do not use vague language like "slightly", "a bit", or "gently" — always use exact
+  numeric values for rotations.
 - Do not output any introductory or concluding text. Generate output ONLY.
-- Do not use adverbs or descriptive keywords like 'rapidly', 'smoothly', 'quickly', 'slowly', or 'continuously' — use only directional language and exact numeric values.
+- Do not use adverbs or descriptive keywords like 'rapidly', 'smoothly', 'quickly',
+  'slowly', or 'continuously' — use only directional language and exact numeric values.
 
 # Output format example
 Step 1: Move root forward; rotate left_hip backward 30 degrees; rotate right_hip forward 30 degrees;
 Step 2: Move root forward; rotate right_hip backward 30 degrees; rotate left_hip forward 30 degrees;
+
+# Internal tracking format (do NOT output this — for your reasoning only)
+After each step, track: {{ joint_name: cumulative_angle, ... }} and confirm no limit is violated.
 """
 
 # Updated few shots with the specific step-by-step formatting
@@ -77,8 +103,8 @@ few_shots = [
         "user_prompt": "Animate the raccoon standing still while nodding its head up and down.",
         "plan": (
             "Step 1: Rotate spine.006 forward 30 degrees; rotate ear.L forward 10 degrees; rotate ear.R forward 10 degrees; rotate tail.001 downward 5 degrees.\n"
-            "Step 2: Rotate spine.006 backward 30 degrees; rotate ear.L backward 10 degrees; rotate ear.R backward 10 degrees; rotate tail.001 upward 5 degrees.\n"
-            "Step 3: Rotate spine.006 forward 30 degrees; rotate ear.L forward 10 degrees; rotate ear.R forward 10 degrees; rotate tail.001 downward 5 degrees.\n"
+            "Step 2: Rotate spine.006 backward 60 degrees; rotate ear.L backward 20 degrees; rotate ear.R backward 20 degrees; rotate tail.001 upward 10 degrees.\n"
+            "Step 3: Rotate spine.006 forward 60 degrees; rotate ear.L forward 20 degrees; rotate ear.R forward 20 degrees; rotate tail.001 downward 10 degrees.\n"
             "Step 4: Rotate spine.006 backward 30 degrees; rotate ear.L backward 10 degrees; rotate ear.R backward 10 degrees; rotate tail.001 upward 5 degrees.\n"
         ),
     },
@@ -106,9 +132,9 @@ few_shots = [
         "user_prompt": "Animate a character jumping over an obstacle.",
         "plan": (
             "Step 1: Move root forward; rotate left_knee forward 40 degrees; rotate right_knee forward 40 degrees; move pelvis downward; rotate spine1 forward 15 degrees; rotate left_shoulder backward 20 degrees; rotate right_shoulder backward 20 degrees.\n"
-            "Step 2: Move root forward and upward; rotate left_knee backward 40 degrees; rotate right_knee backward 40 degrees; move pelvis upward; rotate spine1 backward 15 degrees; rotate left_shoulder forward 20 degrees; rotate right_shoulder forward 20 degrees.\n"
+            "Step 2: Move root forward; move root upward; rotate left_knee backward 40 degrees; rotate right_knee backward 40 degrees; move pelvis upward; rotate spine1 backward 15 degrees; rotate left_shoulder forward 20 degrees; rotate right_shoulder forward 20 degrees.\n"
             "Step 3: Move root forward; rotate left_knee upward 20 degrees; rotate right_knee upward 20 degrees.\n"
-            "Step 4: Move root forward and downward; rotate left_knee backward 30 degrees; rotate right_knee backward 30 degrees; rotate spine1 forward 10 degrees; rotate spine2 forward 10 degrees.\n"
+            "Step 4: Move root forward; move root downward; rotate left_knee backward 30 degrees; rotate right_knee backward 30 degrees; rotate spine1 forward 10 degrees; rotate spine2 forward 10 degrees.\n"
             "Step 5: Move root downward; rotate left_knee forward 50 degrees; rotate right_knee forward 50 degrees; move pelvis downward; rotate left_shoulder downward 15 degrees; rotate right_shoulder downward 15 degrees.\n"
             "Step 6: Rotate left_knee backward 50 degrees; rotate right_knee backward 50 degrees; move pelvis upward; rotate spine1 upward 10 degrees.\n"
         )
@@ -118,10 +144,12 @@ few_shots = [
         "object_json": "",
         "user_prompt": "Animate a flag waving in the wind.",
         "plan": (
-            "Step 1: Rotate flag_bone_1 sideward 10 degrees.\n"
-            "Step 2: Rotate flag_bone_1 sideward 15 degrees; rotate flag_bone_2 sideward 10 degrees.\n"
-            "Step 3: Rotate flag_bone_1 backward 10 degrees; rotate flag_bone_2 sideward 15 degrees; rotate flag_bone_3 sideward 10 degrees.\n"
-            "Step 4: Rotate flag_bone_1 sideward 15 degrees; rotate flag_bone_2 backward 10 degrees; rotate flag_bone_3 sideward 15 degrees.\n"
+            "Step 1: Rotate flag_bone_1 right 10 degrees.\n"
+            "Step 2: Rotate flag_bone_1 right 5 degrees; rotate flag_bone_2 right 10 degrees.\n"
+            "Step 3: Rotate flag_bone_1 left 10 degrees; rotate flag_bone_2 right 5 degrees; rotate flag_bone_3 right 10 degrees.\n"
+            "Step 4: Rotate flag_bone_1 left 5 degrees; rotate flag_bone_2 left 10 degrees; rotate flag_bone_3 right 5 degrees.\n"
+            "Step 5: Rotate flag_bone_1 right 10 degrees; rotate flag_bone_2 left 5 degrees; rotate flag_bone_3 left 10 degrees.\n"
+            "Step 6: Rotate flag_bone_2 right 10 degrees; rotate flag_bone_3 left 5 degrees.\n"
         )
     },
     {
@@ -130,10 +158,10 @@ few_shots = [
         "user_prompt": "Make a character pick up an object from a table.",
         "plan": (
             "Step 1: Rotate pelvis forward 10 degrees; rotate spine1 forward 20 degrees; rotate spine2 forward 15 degrees.\n"
-            "Step 2: Rotate spine1 forward 30 degrees; rotate right_shoulder forward 40 degrees; rotate right_shoulder upward 20 degrees; rotate right_elbow forward 30 degrees; rotate right_thumb outward 20 degrees; rotate right_index outward 20 degrees.\n"
-            "Step 3: Rotate right_elbow forward 50 degrees; rotate right_thumb inward 20 degrees; rotate right_index inward 20 degrees.\n"
-            "Step 4: Rotate right_shoulder backward 40 degrees; rotate right_elbow backward 30 degrees; rotate spine1 backward 30 degrees; rotate spine2 backward 15 degrees.\n"
-            "Step 5: Rotate pelvis backward 10 degrees; rotate right_elbow inward 30 degrees.\n"
+            "Step 2: Rotate spine1 forward 30 degrees; rotate right_shoulder forward 40 degrees; rotate right_shoulder upward 20 degrees; rotate right_elbow forward 30 degrees; rotate right_thumb right 20 degrees; rotate right_index right 20 degrees.\n"
+            "Step 3: Rotate right_elbow forward 50 degrees; rotate right_thumb left 20 degrees; rotate right_index left 20 degrees.\n"
+            "Step 4: Rotate right_shoulder backward 40 degrees; rotate right_shoulder downward 20 degrees; rotate right_elbow backward 30 degrees; rotate spine1 backward 30 degrees; rotate spine2 backward 15 degrees.\n"
+            "Step 5: Rotate pelvis backward 10 degrees; rotate right_elbow left 30 degrees.\n"
         )
     },
     {
@@ -141,9 +169,9 @@ few_shots = [
         "object_json": "",
         "user_prompt": "Animate a rocket launching into the sky.",
         "plan": (
-            "Step 1: Move rocket_root downward 5 degrees.\n"
-            "Step 2: Move rocket_root upward 20 degrees.\n"
-            "Step 3: Move rocket_root upward 40 degrees; rotate rocket_root forward 10 degrees.\n"
+            "Step 1: Move rocket_root downward 5 units.\n"
+            "Step 2: Move rocket_root upward 20 units.\n"
+            "Step 3: Move rocket_root upward 40 units; rotate rocket_root forward 10 degrees.\n"
         )
     },
 ]
