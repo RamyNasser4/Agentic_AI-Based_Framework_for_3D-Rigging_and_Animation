@@ -142,15 +142,42 @@ def _tag_redraw():
                 area.tag_redraw()
 
 
+def _set_status(job_state, status, animate=False):
+    job_state["status"] = status
+    job_state["status_base"] = status if animate else ""
+    job_state["status_dots"] = 0
+
+
+def _animate_waiting_status(scene, job_state):
+    if not job_state["waiting_for_llm"]:
+        return
+
+    status_base = job_state.get("status_base")
+    if not status_base:
+        return
+
+    job_state["status_dots"] = (job_state.get("status_dots", 0) + 1) % 4
+    dots = "." * job_state["status_dots"]
+    updated_status = f"{status_base}{dots}"
+
+    if updated_status != job_state["status"]:
+        job_state["status"] = updated_status
+        _refresh_scene_output(scene, job_state)
+
+
 def _build_output_text(job_state):
-    parts = []
+    parts = [
+        f"Status: {job_state.get('status') or 'Idle'}",
+        f"Progress: {job_state.get('current_step', 0)}/{job_state.get('total_steps', 0)}",
+        f"Current Step: {job_state.get('current_instruction') or '-'}",
+    ]
 
     if job_state["plan_text"]:
+        parts.append("")
         parts.append(job_state["plan_text"])
 
     if job_state["step_logs"]:
-        if parts:
-            parts.append("")
+        parts.append("")
         parts.extend(job_state["step_logs"])
 
     return "\n".join(parts).strip()
@@ -161,24 +188,46 @@ def _refresh_scene_output(scene, job_state):
     _tag_redraw()
 
 
-def _finalize_generation(scene):
+def _shutdown_generation_worker(job_state):
+    worker_thread = job_state.get("thread")
+    request_queue = job_state.get("request_queue")
+
+    if worker_thread is None or request_queue is None:
+        return
+
+    if not worker_thread.is_alive():
+        return
+
+    try:
+        request_queue.put_nowait({"type": "shutdown"})
+    except Exception:
+        pass
+
+
+def _finalize_generation(scene, job_state=None):
+    if job_state is None:
+        job_state = _get_generation_job(scene)
+
+    if job_state is not None:
+        _shutdown_generation_worker(job_state)
+
     scene.gen_loading = False
     _clear_generation_job(scene)
     _tag_redraw()
 
 
-def _queue_worker_error(result_queue, message):
-    result_queue.put(
-        {
-            "type": "error",
-            "message": message,
-        }
-    )
+def _queue_worker_error(result_queue, message, item_type="error", **extra):
+    payload = {
+        "type": item_type,
+        "message": message,
+    }
+    payload.update(extra)
+    result_queue.put(payload)
 
 
-def _generation_worker(result_queue, object_name, object_json, prompt, mode):
+def _generation_worker(request_queue, result_queue, object_name, object_json, prompt):
     try:
-        print(f"[Generator] Worker started for mode `{mode}`.")
+        print(f"[Generator] Worker started for object `{object_name}`.")
         print("[Generator] Stage 2: Generating animation plan in background thread.")
         animation_plan = run_llm(object_name, object_json, prompt)
         plan_steps = split_animation_plan(animation_plan)
@@ -201,65 +250,64 @@ def _generation_worker(result_queue, object_name, object_json, prompt, mode):
         keyframe.initialize_chain()
         print("[Generator] Keyframe agent initialized in worker thread.")
 
-        previous_animation = None
-        generated_results = []
+        while True:
+            request = request_queue.get()
+            if request is None:
+                break
 
-        for index, step in enumerate(plan_steps, start=1):
-            print(f"[Generator] Worker generating keyframes for step {index}/{len(plan_steps)}.")
+            request_type = request.get("type")
+            if request_type == "shutdown":
+                print("[Generator] Worker received shutdown signal.")
+                break
+            if request_type != "step":
+                continue
+
+            index = request["index"]
+            instruction = request["step"]
+            previous_animation = request.get("previous_animation")
+
+            print(f"[Generator] Worker generating keyframes for step {index}.")
 
             try:
                 response = keyframe.invoke_chain(
                     {
                         "object": object_name,
-                        "object_json": object_json,
-                        "instruction": step,
+                        "object_json": request["object_json"],
+                        "instruction": instruction,
                         "previous_animation": previous_animation,
                     }
                 )
                 print(f"[Generator] Worker generated response for step {index}.")
             except Exception as error:
-                generated_results.append(
-                    {
-                        "type": "step_error",
-                        "index": index,
-                        "step": step,
-                        "message": f"Keyframe generation failed for step {index}: {error}",
-                    }
-                )
                 print(f"[Generator] Keyframe generation failed for step {index}: {error}")
+                _queue_worker_error(
+                    result_queue,
+                    f"Keyframe generation failed for step {index}: {error}",
+                    item_type="step_error",
+                    index=index,
+                    step=instruction,
+                )
                 continue
 
             if response is None:
-                generated_results.append(
-                    {
-                        "type": "step_error",
-                        "index": index,
-                        "step": step,
-                        "message": f"Keyframe generation returned no result for step {index}.",
-                    }
-                )
                 print(f"[Generator] Keyframe generation returned no result for step {index}.")
+                _queue_worker_error(
+                    result_queue,
+                    f"Keyframe generation returned no result for step {index}.",
+                    item_type="step_error",
+                    index=index,
+                    step=instruction,
+                )
                 continue
 
-            generated_results.append(
+            result_queue.put(
                 {
                     "type": "step_result",
                     "index": index,
-                    "step": step,
+                    "step": instruction,
                     "response": response,
                 }
             )
-            previous_animation = response
-
-        for item in generated_results:
-            result_queue.put(item)
-
-        result_queue.put(
-            {
-                "type": "done",
-                "mode": mode,
-            }
-        )
     except Exception as error:
         print("[Generator] Worker thread failed:")
         print(traceback.format_exc())
@@ -271,15 +319,79 @@ def _execute_generation_step(scene, job_state, item):
     step = item["step"]
     response = item["response"]
 
+    _set_status(job_state, f"Executing Step {index}")
+    _refresh_scene_output(scene, job_state)
+
     try:
         print(f"[Generator] Stage 5.{index}: Executing keyframes in Blender.")
         job_state["executor"].execute_from_text(response)
         print(f"[Generator] Blender execution completed for step {index}.")
+        job_state["previous_animation"] = response
         job_state["step_logs"].append(f"Executed Step {index}: {step}")
     except Exception as error:
         print(f"[Generator] Blender execution failed for step {index}: {error}")
         job_state["step_logs"].append(f"Execution failed for Step {index}: {error}")
+        _set_status(job_state, f"Execution failed on Step {index}")
+        _refresh_scene_output(scene, job_state)
+        _finalize_generation(scene, job_state)
+        return
 
+    job_state["current_step"] = index
+    job_state["waiting_for_llm"] = False
+
+    if job_state["current_step"] >= job_state["total_steps"]:
+        job_state["current_instruction"] = ""
+        _set_status(job_state, "Completed")
+        _refresh_scene_output(scene, job_state)
+        _finalize_generation(scene, job_state)
+        return
+
+    job_state["current_instruction"] = job_state["steps"][job_state["current_step"]]
+    _set_status(job_state, f"Step {index} complete")
+    _refresh_scene_output(scene, job_state)
+
+
+def _dispatch_next_step(scene, job_state):
+    if job_state["waiting_for_llm"]:
+        return
+    if not job_state["plan_ready"]:
+        return
+    if job_state["current_step"] >= job_state["total_steps"]:
+        return
+
+    step_index = job_state["current_step"] + 1
+    instruction = job_state["steps"][job_state["current_step"]]
+    job_state["current_instruction"] = instruction
+
+    _set_status(job_state, f"Parsing scene for Step {step_index}")
+    _refresh_scene_output(scene, job_state)
+
+    try:
+        object_json = job_state["parser"].generate_object_json([job_state["object_name"]])
+        print(f"[Generator] Parsed fresh scene state for step {step_index}.")
+    except Exception as error:
+        print(f"[Generator] Scene parse failed for step {step_index}: {error}")
+        job_state["step_logs"].append(f"Scene parse failed for Step {step_index}: {error}")
+        _set_status(job_state, f"Scene parse failed on Step {step_index}")
+        _refresh_scene_output(scene, job_state)
+        _finalize_generation(scene, job_state)
+        return
+
+    _set_status(job_state, f"Sending Step {step_index} to LLM")
+    _refresh_scene_output(scene, job_state)
+
+    job_state["request_queue"].put(
+        {
+            "type": "step",
+            "index": step_index,
+            "step": instruction,
+            "object_json": object_json,
+            "previous_animation": job_state["previous_animation"],
+        }
+    )
+
+    job_state["waiting_for_llm"] = True
+    _set_status(job_state, f"Waiting for LLM (Step {step_index})", animate=True)
     _refresh_scene_output(scene, job_state)
 
 
@@ -290,49 +402,61 @@ def _handle_generation_queue(scene):
         _tag_redraw()
         return None
 
-    result_queue = job_state["queue"]
+    result_queue = job_state["result_queue"]
 
     try:
         item = result_queue.get_nowait()
     except queue.Empty:
-        if job_state["thread"].is_alive():
+        if not job_state["thread"].is_alive():
+            job_state["step_logs"].append("Generation worker stopped before completion.")
+            _set_status(job_state, "Worker stopped")
+            _refresh_scene_output(scene, job_state)
+            _finalize_generation(scene, job_state)
+            return None
+
+        if job_state["waiting_for_llm"]:
+            _animate_waiting_status(scene, job_state)
             return _TIMER_INTERVAL
 
-        if not job_state["done"]:
-            job_state["step_logs"].append("Generation stopped before completion.")
-            _refresh_scene_output(scene, job_state)
+        if job_state["plan_ready"] and job_state["current_step"] < job_state["total_steps"]:
+            _dispatch_next_step(scene, job_state)
+            return _TIMER_INTERVAL if _get_generation_job(scene) is not None else None
 
-        _finalize_generation(scene)
-        return None
+        return _TIMER_INTERVAL
 
     item_type = item["type"]
 
     if item_type == "plan":
         job_state["plan_text"] = item["plan"]
+        job_state["steps"] = item["steps"]
+        job_state["total_steps"] = len(item["steps"])
+        job_state["plan_ready"] = True
+        job_state["current_instruction"] = job_state["steps"][0] if job_state["steps"] else ""
+        job_state["step_logs"].append(f"Planner returned {job_state['total_steps']} step(s).")
+        _set_status(job_state, f"Plan ready ({job_state['total_steps']} steps)")
         _refresh_scene_output(scene, job_state)
         return _TIMER_INTERVAL
 
     if item_type == "step_result":
+        job_state["waiting_for_llm"] = False
         _execute_generation_step(scene, job_state, item)
-        return _TIMER_INTERVAL
+        return _TIMER_INTERVAL if _get_generation_job(scene) is not None else None
 
     if item_type == "step_error":
+        job_state["waiting_for_llm"] = False
         job_state["step_logs"].append(item["message"])
+        job_state["current_instruction"] = item.get("step") or job_state["current_instruction"]
+        _set_status(job_state, f"Step {item.get('index', '?')} failed")
         _refresh_scene_output(scene, job_state)
-        return _TIMER_INTERVAL
-
-    if item_type == "error":
-        job_state["step_logs"].append(item["message"])
-        _refresh_scene_output(scene, job_state)
-        _finalize_generation(scene)
+        _finalize_generation(scene, job_state)
         return None
 
-    if item_type == "done":
-        job_state["done"] = True
-        if not job_state["step_logs"]:
-            job_state["step_logs"].append(f"Generated with {item['mode']}.")
+    if item_type == "error":
+        job_state["waiting_for_llm"] = False
+        job_state["step_logs"].append(item["message"])
+        _set_status(job_state, "Generation failed")
         _refresh_scene_output(scene, job_state)
-        _finalize_generation(scene)
+        _finalize_generation(scene, job_state)
         return None
 
     return _TIMER_INTERVAL
@@ -345,6 +469,14 @@ def _register_generation_timer(scene):
     bpy.app.timers.register(timer_callback, first_interval=_TIMER_INTERVAL)
 
 
+def _resolve_target_object_name(context, scene):
+    if getattr(scene, "gen_mode", ""):
+        return scene.gen_mode
+    if context.active_object is not None:
+        return context.active_object.name
+    return ""
+
+
 class GENERATOR_OT_generate(bpy.types.Operator):
     bl_label = "Generate"
     bl_idname = "generator.generate"
@@ -354,7 +486,6 @@ class GENERATOR_OT_generate(bpy.types.Operator):
 
         scene = context.scene
         user_prompt = scene.gen_prompt
-        mode = scene.gen_mode
 
         if user_prompt == "Write your prompt here...":
             self.report({"WARNING"}, "Please enter a real prompt")
@@ -373,42 +504,58 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             scene.gen_loading = False
             _clear_generation_job(scene)
 
-        object_name = "Human Male"
+        object_name = _resolve_target_object_name(context, scene)
+        if not object_name:
+            self.report({"WARNING"}, "Select a valid object before generating")
+            return {"CANCELLED"}
+
         print(f"[Generator] Starting pipeline for object `{object_name}`.")
         print(f"[Generator] Prompt: {user_prompt}")
-        print(f"[Generator] Mode: {mode}")
 
         parser = SceneParser(precision=1)
 
         try:
             print("[Generator] Stage 1: Parsing initial scene state on main thread.")
-            object_json = parser.generate_object_json(["SMPLX-lh-male"])
+            object_json = parser.generate_object_json([object_name])
             print("[Generator] Initial scene parse completed.")
         except Exception as error:
             print(f"[Generator] Initial scene parse failed: {error}")
             self.report({"ERROR"}, f"Scene parse failed: {error}")
             return {"CANCELLED"}
 
+        request_queue = queue.Queue()
         result_queue = queue.Queue()
         worker_thread = threading.Thread(
             target=_generation_worker,
-            args=(result_queue, object_name, object_json, user_prompt, mode),
+            args=(request_queue, result_queue, object_name, object_json, user_prompt),
             name="GradGeneratorWorker",
             daemon=True,
         )
 
         job_state = {
             "scene": scene,
-            "queue": result_queue,
+            "object_name": object_name,
+            "request_queue": request_queue,
+            "result_queue": result_queue,
             "thread": worker_thread,
+            "parser": parser,
             "executor": BlenderExecutor(),
+            "steps": [],
+            "current_step": 0,
+            "total_steps": 0,
+            "current_instruction": "",
+            "status": "Generating plan",
+            "status_base": "",
+            "status_dots": 0,
+            "waiting_for_llm": False,
+            "previous_animation": None,
             "plan_text": "",
             "step_logs": [],
-            "done": False,
+            "plan_ready": False,
         }
 
         scene.gen_loading = True
-        scene.gen_output = ""
+        _refresh_scene_output(scene, job_state)
         _set_generation_job(scene, job_state)
 
         worker_thread.start()
