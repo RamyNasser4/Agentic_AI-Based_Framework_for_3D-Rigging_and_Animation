@@ -306,31 +306,6 @@ class KeyFrameAgent:
         prepared_input = self._prepare_input(input_dict)
         return self._enforce_newlines(self.chain.invoke(prepared_input))
 
-    def stream_chain(self, input_dict: dict):
-        if not hasattr(self, "chain"):
-            raise RuntimeError("Chain is not initialized. Call initialize_chain() first.")
-
-        prepared_input = self._prepare_input(input_dict)
-        raw_text = ""
-        processed_text = ""
-
-        for chunk in self.chain.stream(prepared_input):
-            chunk_text = str(chunk)
-            if not chunk_text:
-                continue
-
-            raw_text += chunk_text
-            sanitized_text = self._enforce_newlines(raw_text)
-
-            if sanitized_text.startswith(processed_text):
-                delta = sanitized_text[len(processed_text):]
-            else:
-                delta = sanitized_text
-
-            processed_text = sanitized_text
-
-            if delta:
-                yield delta
 if __name__ == "__main__":
     keyframe = KeyFrameAgent()
     keyframe.initialize_chain()
