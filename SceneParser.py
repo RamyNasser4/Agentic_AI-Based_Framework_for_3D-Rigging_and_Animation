@@ -122,7 +122,10 @@ class SceneParser:
         if Vector is None:
             raise RuntimeError("SceneParser must be run inside Blender because mathutils is unavailable.")
 
-        root_bone = obj.pose.bones["root"]
+        try:
+            root_bone = obj.pose.bones["root"]
+        except KeyError:
+            root_bone = obj.pose.bones["master"]
         orientation = root_bone.matrix.to_3x3()  # world-space including rest pose
         forward = (orientation @ Vector((0.0, 1.0, 0.0))).normalized()
         right = (orientation @ Vector((1.0, 0.0, 0.0))).normalized()
