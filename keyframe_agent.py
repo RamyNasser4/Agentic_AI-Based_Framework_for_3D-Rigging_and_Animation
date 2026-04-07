@@ -26,7 +26,39 @@ SYSTEM_MESSAGE = ( \
     "If a previous animation is provided, start the new animation at the provided start time, which is the end time of the previous animation, and continue smoothly from the last keyframes of that previous animation. " \
     "When generating motion that includes translation, align the root and any body-facing rotations with the translation direction so the character or object faces where it is moving. If the translation direction changes, update rotation smoothly to follow that new direction and avoid rotations that contradict the path of travel. " \
     "When an animated element has both translation keyframes in [] and rotation keyframes in (), the rotation keyframe timestamps must match the translation keyframe timestamps exactly so the motion stays synchronized across position and rotation. " \
+    "STRICT FORMATTING RULES (MUST FOLLOW): " \
+    "Any vector in [] MUST have exactly 4 values: [t,x,y,z]. " \
+    "Any vector in () MUST have exactly 5 values: (t,x,y,z,w). " \
+    "NEVER output [x,y,z] or (x,y,z,w) without time. " \
+    "Every keyframe MUST include a timestamp. " \
+    "If formatting is violated, the output is INVALID. " \
+    "CRITICAL RULES (HIGHEST PRIORITY): " \
+    "A single line MUST contain ONLY ONE of the following: translation keyframes using [] OR rotation keyframes using (). " \
+    "NEVER mix [] and () in the same line. " \
+    "LINE STRUCTURE RULES: " \
+    "Output EXACTLY one joint per line. " \
+    "Each joint MUST start on a new line. " \
+    "NEVER place multiple joints on the same line. " \
+    "OUTPUT RULES: " \
+    "Output EXACTLY one joint per line. " \
+    "Each joint MUST be on a new line. " \
+    "Do NOT merge multiple joints into one line. " \
+    "Do NOT output explanations, only animation lines. " \
     "Keep the animation data formatting unchanged." \
+    "INVALID:\n" \
+    "SMPLX-lh-male,[0.0,0.0,0.0]\n" \
+    "VALID:\n" \
+    "SMPLX-lh-male,[0.0,0.0,0.0,0.0]\n" \
+    "INVALID:\n" \
+    "SMPLX-lh-male,(0.0,0.0,0.0,1.0)\n" \
+    "VALID:\n" \
+    "SMPLX-lh-male,(0.0,0.0,0.0,0.0,1.0)\n" \
+    "INVALID:\n" \
+    "Joint,[...],(...)\n" \
+    "Joint1,... Joint2,...\n" \
+    "VALID:\n" \
+    "Joint,[...]\n" \
+    "Joint,(...)\n" \
     "# Example: The object you will animate is a **whale**. " \
     "Object JSON: name:Armature,position:(0.0000,0.0000,0.0000),rotation:(-0.7,0.0,0.0,0.7),children:[name:Root,position:(0.0000,0.0168,0.0141),rotation:(0.7,0.0,0.0,0.7),children:[name:Head,position:(0.0000,0.0062,0.0198),rotation:(0.7,0.0,0.0,0.7),children:[name:Head_end,position:(0.0000,0.0107,0.0000),rotation:(0.0,0.0,0.0,1.0)]," \
     "name:Spine1,position:(0.0000,0.0050,0.0154),rotation:(-0.7,0.0,0.0,0.7),children:[name:Spine2,position:(0.0000,0.0156,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine3,position:(0.0000,0.0166,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine4,position:(0.0000,0.0172,0.0000),rotation:(-0.1,0.0,0.0,1.0)," \
@@ -109,50 +141,17 @@ animation_examples = [
         "start_time": "0.0s",
         "previous_animation_context": "No previous animation is provided. Start a fresh animation at 0.0s.",
         "animation": (
-                        "metarig,[0.00,0.00,0.00,0.00],[1.56,0.00,0.00,0.00]"
-                        "metarig/spine/spine.001/spine.002/spine.003/spine"
-                        ".006,(0.0,-0.1,0.0,0.0,1.0),(0.5,-0.1,0.0,0.0,1.0)"
-                        ",(0.8,-0.1,0.0,0.0,1.0),(1.2,0.0,0.0,0.0,1.0)"
-                        ",(1.6,-0.1,0.0,0.0,1.0)"
-                        "metarig/spine/spine.001/spine.002/spine.003/spine.006/ear.L"
-                        ",(0.0,-0.1,-0.1,0.1,1.0),(0.2,-0.1,0.0,0.0,1.0)"
-                        ",(0.4,0.0,-0.1,0.1,1.0),(0.6,0.0,-0.1,0.2,1.0)"
-                        ",(1.0,-0.1,-0.1,0.2,1.0),(1.2,0.0,-0.1,0.2,1.0)"
-                        ",(1.5,-0.1,-0.1,0.1,1.0),(1.6,-0.1,-0.1,0.1,1.0)"
-                        "metarig/spine/spine.001/spine.002/spine.003/spine.006/ear.R"
-                        ",(0.0,-0.1,0.0,-0.3,1.0),(0.2,-0.1,0.0,-0.3,0.9)"
-                        ",(0.4,0.0,0.1,-0.2,1.0),(0.6,0.0,0.0,-0.2,1.0)"
-                        ",(1.0,-0.1,0.0,-0.1,1.0),(1.2,0.0,0.0,-0.2,1.0)"
-                        ",(1.5,-0.1,0.1,-0.2,1.0),(1.6,-0.1,0.0,-0.3,1.0)"
-                        "metarig/spine/spine.001/spine.002/spine.003/shoulder.L/upper_arm.L"
-                        ",(0.0,-0.1,0.7,-0.5,-0.5),(0.5,-0.1,0.8,-0.4,-0.4)"
-                        ",(0.9,-0.1,0.9,-0.4,-0.4),(1.3,-0.1,0.7,-0.5,-0.5)"
-                        ",(1.6,-0.1,0.7,-0.5,-0.5)"
-                        "metarig/spine/spine.001/spine.002/spine.003/shoulder.L/upper_arm.L/"
-                        "forearm.L,(0.0,0.1,-0.1,0.0,1.0),(0.4,0.1,-0.1,0.0,1.0)"
-                        ",(0.8,-0.1,-0.2,0.0,1.0),(1.2,0.0,-0.2,0.0,1.0)"
-                        ",(1.6,0.1,-0.1,0.0,1.0)"
-                        "metarig/spine/spine.001/spine.002/spine.003/shoulder.L/upper_arm.L/"
-                        "forearm.L/hand.L,(0.0,0.1,0.0,-0.1,1.0),(0.5,0.1,0.0,0.0,1.0)"
-                        ",(1.0,0.1,-0.1,0.1,1.0),(1.5,0.1,0.0,0.0,1.0)"
-                        ",(1.6,0.1,0.0,-0.1,1.0)"
-                        "metarig/spine/tail,(0.0,-0.8,0.0,0.0,0.6),(0.2,-0.8,0.0,0.0,0.6)"
-                        ",(0.4,-0.9,-0.2,-0.2,0.5),(0.6,-0.9,-0.2,-0.2,0.4)"
-                        ",(1.1,-0.8,-0.1,-0.1,0.5),(1.6,-0.8,0.0,0.0,0.6)"
-                        "metarig/spine/tail/tail.001,(0.0,0.1,0.0,0.1,1.0)"
-                        ",(0.4,0.1,0.0,0.0,1.0),(0.8,0.0,0.1,-0.2,1.0)"
-                        ",(1.2,0.1,0.0,0.0,1.0),(1.6,0.1,0.0,0.1,1.0)"
-                        "metarig/spine/tail/tail.001/tail.002,(0.0,0.1,0.0,0.2,1.0)"
-                        ",(0.4,0.2,0.0,0.3,0.9),(0.6,0.1,0.0,0.1,1.0)"
-                        ",(0.7,0.1,0.0,-0.1,1.0),(1.0,0.0,0.0,-0.4,0.9)"
-                        ",(1.3,0.1,0.0,-0.1,1.0),(1.5,0.1,0.0,0.1,1.0)"
-                        ",(1.6,0.1,0.0,0.2,1.0)"
-                        "metarig/spine/tail/tail.001/tail.002/tail.003,(0.0,0.0,0.1,0.2,1.0)"
-                        ",(0.4,0.0,0.0,0.5,0.9),(0.6,0.0,0.0,0.5,0.9),(0.7,0.0,0.0,0.4,0.9)"
-                        ",(0.8,0.0,0.0,0.1,1.0),(1.0,0.0,0.0,-0.2,1.0)"
-                        ",(1.1,0.0,0.0,-0.4,0.9),(1.3,0.0,0.0,-0.4,0.9)"
-                        ",(1.4,0.0,0.0,-0.1,1.0),(1.5,0.0,0.1,0.1,1.0)"
-                        ",(1.6,0.0,0.1,0.2,1.0)"
+                        "metarig,[0.00,0.00,0.00,0.00],[1.56,0.00,0.00,0.00]\n"
+                        "metarig/spine/spine.001/spine.002/spine.003/spine.006,(0.0,-0.1,0.0,0.0,1.0),(0.5,-0.1,0.0,0.0,1.0),(0.8,-0.1,0.0,0.0,1.0),(1.2,0.0,0.0,0.0,1.0),(1.6,-0.1,0.0,0.0,1.0)\n"
+                        "metarig/spine/spine.001/spine.002/spine.003/spine.006/ear.L,(0.0,-0.1,-0.1,0.1,1.0),(0.2,-0.1,0.0,0.0,1.0),(0.4,0.0,-0.1,0.1,1.0),(0.6,0.0,-0.1,0.2,1.0),(1.0,-0.1,-0.1,0.2,1.0),(1.2,0.0,-0.1,0.2,1.0),(1.5,-0.1,-0.1,0.1,1.0),(1.6,-0.1,-0.1,0.1,1.0)\n"
+                        "metarig/spine/spine.001/spine.002/spine.003/spine.006/ear.R,(0.0,-0.1,0.0,-0.3,1.0),(0.2,-0.1,0.0,-0.3,0.9),(0.4,0.0,0.1,-0.2,1.0),(0.6,0.0,0.0,-0.2,1.0),(1.0,-0.1,0.0,-0.1,1.0),(1.2,0.0,0.0,-0.2,1.0),(1.5,-0.1,0.1,-0.2,1.0),(1.6,-0.1,0.0,-0.3,1.0)\n"
+                        "metarig/spine/spine.001/spine.002/spine.003/shoulder.L/upper_arm.L,(0.0,-0.1,0.7,-0.5,-0.5),(0.5,-0.1,0.8,-0.4,-0.4),(0.9,-0.1,0.9,-0.4,-0.4),(1.3,-0.1,0.7,-0.5,-0.5),(1.6,-0.1,0.7,-0.5,-0.5)\n"
+                        "metarig/spine/spine.001/spine.002/spine.003/shoulder.L/upper_arm.L/forearm.L,(0.0,0.1,-0.1,0.0,1.0),(0.4,0.1,-0.1,0.0,1.0),(0.8,-0.1,-0.2,0.0,1.0),(1.2,0.0,-0.2,0.0,1.0),(1.6,0.1,-0.1,0.0,1.0)\n"
+                        "metarig/spine/spine.001/spine.002/spine.003/shoulder.L/upper_arm.L/forearm.L/hand.L,(0.0,0.1,0.0,-0.1,1.0),(0.5,0.1,0.0,0.0,1.0),(1.0,0.1,-0.1,0.1,1.0),(1.5,0.1,0.0,0.0,1.0),(1.6,0.1,0.0,-0.1,1.0)\n"
+                        "metarig/spine/tail,(0.0,-0.8,0.0,0.0,0.6),(0.2,-0.8,0.0,0.0,0.6),(0.4,-0.9,-0.2,-0.2,0.5),(0.6,-0.9,-0.2,-0.2,0.4),(1.1,-0.8,-0.1,-0.1,0.5),(1.6,-0.8,0.0,0.0,0.6)\n"
+                        "metarig/spine/tail/tail.001,(0.0,0.1,0.0,0.1,1.0),(0.4,0.1,0.0,0.0,1.0),(0.8,0.0,0.1,-0.2,1.0),(1.2,0.1,0.0,0.0,1.0),(1.6,0.1,0.0,0.1,1.0)\n"
+                        "metarig/spine/tail/tail.001/tail.002,(0.0,0.1,0.0,0.2,1.0),(0.4,0.2,0.0,0.3,0.9),(0.6,0.1,0.0,0.1,1.0),(0.7,0.1,0.0,-0.1,1.0),(1.0,0.0,0.0,-0.4,0.9),(1.3,0.1,0.0,-0.1,1.0),(1.5,0.1,0.0,0.1,1.0),(1.6,0.1,0.0,0.2,1.0)\n"
+                        "metarig/spine/tail/tail.001/tail.002/tail.003,(0.0,0.0,0.1,0.2,1.0),(0.4,0.0,0.0,0.5,0.9),(0.6,0.0,0.0,0.5,0.9),(0.7,0.0,0.0,0.4,0.9),(0.8,0.0,0.0,0.1,1.0),(1.0,0.0,0.0,-0.2,1.0),(1.1,0.0,0.0,-0.4,0.9),(1.3,0.0,0.0,-0.4,0.9),(1.4,0.0,0.0,-0.1,1.0),(1.5,0.0,0.1,0.1,1.0),(1.6,0.0,0.1,0.2,1.0)"
                     )
     },
 ]
@@ -264,12 +263,74 @@ class KeyFrameAgent:
         payload["previous_animation_context"] = previous_animation_context
         return payload
 
+    def _enforce_newlines(self, text: str) -> str:
+        import re
+
+        text = str(text or "")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        # Ensure every joint starts on a new line.
+        text = re.sub(r"(?<!\n)(SMPLX(?:-[^,\[\(\s]+)?|metarig|Armature)", r"\n\1", text)
+
+        # Remove extra spaces.
+        text = re.sub(r"[ \t]+", " ", text)
+
+        # Split and clean lines.
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+        cleaned_lines = []
+        for line in lines:
+            has_translation = "[" in line
+            has_rotation = "(" in line
+
+            # If both exist, split translation and rotation into separate lines for the same joint.
+            if has_translation and has_rotation:
+                joint_name = line.split(",", 1)[0].strip()
+                payloads = re.findall(r"\[[^\]]*\]|\([^\)]*\)", line)
+                translation_parts = [payload for payload in payloads if payload.startswith("[")]
+                rotation_parts = [payload for payload in payloads if payload.startswith("(")]
+
+                if translation_parts:
+                    cleaned_lines.append(",".join([joint_name] + translation_parts))
+                if rotation_parts:
+                    cleaned_lines.append(",".join([joint_name] + rotation_parts))
+            else:
+                cleaned_lines.append(line)
+
+        return "\n".join(cleaned_lines)
+
     def invoke_chain(self, input_dict: dict) -> str:
         if not hasattr(self, "chain"):
             raise RuntimeError("Chain is not initialized. Call initialize_chain() first.")
 
         prepared_input = self._prepare_input(input_dict)
-        return self.chain.invoke(prepared_input)
+        return self._enforce_newlines(self.chain.invoke(prepared_input))
+
+    def stream_chain(self, input_dict: dict):
+        if not hasattr(self, "chain"):
+            raise RuntimeError("Chain is not initialized. Call initialize_chain() first.")
+
+        prepared_input = self._prepare_input(input_dict)
+        raw_text = ""
+        processed_text = ""
+
+        for chunk in self.chain.stream(prepared_input):
+            chunk_text = str(chunk)
+            if not chunk_text:
+                continue
+
+            raw_text += chunk_text
+            sanitized_text = self._enforce_newlines(raw_text)
+
+            if sanitized_text.startswith(processed_text):
+                delta = sanitized_text[len(processed_text):]
+            else:
+                delta = sanitized_text
+
+            processed_text = sanitized_text
+
+            if delta:
+                yield delta
 if __name__ == "__main__":
     keyframe = KeyFrameAgent()
     keyframe.initialize_chain()
