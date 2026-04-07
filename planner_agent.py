@@ -15,13 +15,37 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
 - Before writing any step, mentally track the running total angle of every joint.
 - Each step specifies the DELTA rotation to apply in that step, but you must verify that
   the resulting cumulative angle stays within the joint's anatomical limits.
-- Rotation directions are strictly: "left", "right", "forward", "backward", "up", "down".
+- Distinguish LOCAL rotation from INHERITED rotation.
+- Effective rotation equals the sum of the hierarchy chain plus the joint's local rotation.
+- Rotation directions are strictly: "left", "right", "forward", "backward", "upward", "downward".
   Never use "sideways", "laterally", "inward", "outward", or any other directional word.
 - "left" and "right" refer to the object's own local left/right axis.
 - "forward" and "backward" refer to the object's own local forward/backward axis.
 - Never treat a later step as a fresh pose. Every step starts from the exact accumulated
   state produced by all previous steps.
 - Never implicitly reset a joint to 0 degrees unless an explicit opposite delta is written.
+
+# Hierarchy and Inheritance Rules
+- The object JSON defines a strict parent-child hierarchy.
+- Transformations propagate from parent to all descendants.
+- Never treat joints as independent.
+- Avoid stacking rotations across a chain:
+  BAD: rotating hip forward AND knee forward
+  GOOD: hip drives motion, knee refines only
+- If a parent joint already produces motion:
+  child joints MUST NOT repeat the same directional rotation
+- Hinge joints (knee, elbow):
+  - LOCAL articulation only
+  - never used for global motion
+  - never duplicate parent direction
+- Child joints may:
+  - stay unchanged
+  - apply SMALL corrective rotation (<= 50 percent of parent)
+- Always assume:
+  final_rotation(child) = parent_rotation + local_rotation
+- Before writing each step:
+  - detect parent-child conflicts
+  - remove or reduce child rotation if redundant
 
 # Anatomical Limits (enforce these hard limits on cumulative angles)
 - A joint must never exceed its natural range of motion.
@@ -78,6 +102,9 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
   requests continuous turning, bending, or rising.
 - Repeated motions must include corrective or opposing rotations over time so the sequence
   stays bounded and stable instead of drifting.
+- Prevent drift across the hierarchy, not just per joint.
+- Check that inherited parent motion plus child local motion does not create hidden
+  cumulative drift down a chain.
 - Once a movement pattern is established in Steps 1 and 2, all following steps must preserve
   the same structure, ordering, rhythm, and joint-role pattern.
 
@@ -91,8 +118,12 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
 - Root movement must always use an explicit numeric distance or unit value
   (e.g., "Move root forward 1 unit").
 - Prefer controlled rotation values in the 5 to 15 degree range for stable multi-step motion.
-- After every step, internally verify cumulative angles, balance, support, symmetry,
-  phase consistency, and anatomical limits before writing the next step.
+- Prioritize higher-level joints closer to the root for primary motion.
+- Child joints are refinement only.
+- When unsure, REMOVE child rotation instead of duplicating parent motion.
+- After every step, internally verify cumulative angles, inherited rotation, hierarchy
+  conflicts, balance, support, symmetry, phase consistency, and anatomical limits before
+  writing the next step.
 - Only include joints that are actively moving in that step. Never mention a joint if its
   delta value is 0 or unchanged.
 - Explicitly use the exact joint names provided in the object JSON.
@@ -112,6 +143,33 @@ Step 4: Move root forward 1 unit; rotate left_hip backward 10 degrees; rotate ri
 # Internal tracking format (do NOT output this — for your reasoning only)
 After each step, track: {{ joint_name: cumulative_angle, ... }} plus support limb, motion phase,
 and left-right symmetry state, and confirm no limit is violated and no implicit reset occurs.
+
+# Strict Action Phrase Enforcement
+- Every action phrase MUST strictly follow exactly one of these 3-part formats:
+  - Rotation: "rotate <joint_name> <direction> <number> degrees"
+  - Translation: "move <joint_name> <direction> <number> units"
+- INSTRUCTION TYPE is limited to: move, rotate.
+- DIRECTION is limited to: forward, backward, left, right, upward, downward.
+- MAGNITUDE is mandatory and must be numeric plus the correct required unit.
+- Every action MUST include ALL THREE components: instruction type, direction, and magnitude.
+- If any one of those three components is missing, the action is INVALID and must not appear.
+- Rotation actions MUST use "degrees" and MUST NEVER use "degree".
+- Translation actions MUST use "units" and MUST NEVER use "unit".
+- NEVER output verbs other than "move" or "rotate". Forbidden examples include "tilt",
+  "bend", "shift", and any other verb outside the allowed set.
+- NEVER output non-numeric magnitudes such as "slightly" or any other descriptive substitute
+  for a number.
+- NEVER use any direction synonym outside the allowed set. Forbidden direction words include
+  "sideways", "inward", "outward", "up", and "down".
+- Before outputting each step, validate every action phrase against the exact required
+  structure.
+- If ANY action phrase does not match the exact required structure, FIX it before output.
+- If an invalid action phrase cannot be fixed to exactly match an allowed format, REMOVE that
+  action phrase entirely.
+- No step may be output unless ALL action phrases in that step fully comply with:
+  [instruction] + [direction] + [numeric magnitude + correct unit].
+- This strict action-phrase validation rule OVERRIDES all other rules, examples, or wording
+  elsewhere in this prompt.
 """
 
 # Updated few shots with the specific step-by-step formatting
@@ -163,10 +221,10 @@ few_shots = [
         ),
         "user_prompt": "Animate the raccoon standing still while nodding its head up and down.",
         "plan": (
-            "Step 1: Rotate spine.006 forward 10 degrees; rotate ear.L forward 5 degrees; rotate ear.R forward 5 degrees; rotate tail.001 downward 5 degrees;"
-            "Step 2: Rotate spine.006 backward 10 degrees; rotate ear.L backward 5 degrees; rotate ear.R backward 5 degrees; rotate tail.001 upward 5 degrees;"
-            "Step 3: Rotate spine.006 backward 10 degrees; rotate ear.L backward 5 degrees; rotate ear.R backward 5 degrees; rotate tail.001 upward 5 degrees;"
-            "Step 4: Rotate spine.006 forward 10 degrees; rotate ear.L forward 5 degrees; rotate ear.R forward 5 degrees; rotate tail.001 downward 5 degrees;"
+            "Step 1: Rotate spine.006 forward 10 degrees; rotate tail upward 5 degrees;"
+            "Step 2: Rotate spine.006 backward 20 degrees; rotate tail downward 10 degrees;"
+            "Step 3: Rotate spine.006 forward 20 degrees; rotate tail upward 10 degrees;"
+            "Step 4: Rotate spine.006 backward 10 degrees; rotate tail downward 5 degrees;"
         ),
     },
     {
@@ -181,10 +239,10 @@ few_shots = [
         ),
         "user_prompt": "Create a swim animation for the whale.",
         "plan": (
-            "Step 1: Move Armature forward 1 unit; rotate Spine1 downward 10 degrees; rotate Spine2 downward 10 degrees; rotate Head upward 5 degrees; rotate TopFlipper.L backward 10 degrees; rotate TopFlipper.R backward 10 degrees; rotate Tail downward 10 degrees;"
-            "Step 2: Move Armature forward 1 unit; rotate Spine1 upward 10 degrees; rotate Spine2 upward 10 degrees; rotate Spine3 downward 10 degrees; rotate Spine4 downward 10 degrees; rotate Tail downward 5 degrees;"
-            "Step 3: Move Armature forward 1 unit; rotate Spine3 upward 10 degrees; rotate Spine4 upward 10 degrees; rotate Head downward 5 degrees; rotate TopFlipper.L forward 10 degrees; rotate TopFlipper.R forward 10 degrees; rotate Tail upward 15 degrees;"
-            "Step 4: Move Armature forward 1 unit; rotate Spine1 downward 10 degrees; rotate Spine2 downward 10 degrees; rotate Tail downward 10 degrees;"
+            "Step 1: Move Armature forward 1 unit; rotate Spine1 downward 10 degrees; rotate Spine2 downward 5 degrees; rotate Head upward 5 degrees; rotate TopFlipper.L backward 10 degrees; rotate TopFlipper.R backward 10 degrees; rotate Tail downward 10 degrees;"
+            "Step 2: Move Armature forward 1 unit; rotate Spine1 upward 20 degrees; rotate Spine2 upward 10 degrees; rotate Spine3 upward 5 degrees; rotate TopFlipper.L forward 20 degrees; rotate TopFlipper.R forward 20 degrees; rotate Tail upward 15 degrees;"
+            "Step 3: Move Armature forward 1 unit; rotate Spine1 downward 20 degrees; rotate Spine2 downward 10 degrees; rotate Spine3 downward 5 degrees; rotate Head downward 10 degrees; rotate TopFlipper.L backward 20 degrees; rotate TopFlipper.R backward 20 degrees; rotate Tail downward 15 degrees;"
+            "Step 4: Move Armature forward 1 unit; rotate Spine1 upward 10 degrees; rotate Spine2 upward 5 degrees; rotate Head upward 5 degrees; rotate TopFlipper.L forward 10 degrees; rotate TopFlipper.R forward 10 degrees; rotate Tail upward 10 degrees;"
         )
     },
 ]
