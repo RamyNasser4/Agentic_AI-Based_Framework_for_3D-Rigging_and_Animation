@@ -10,6 +10,16 @@ __pycache__/
 .vscode/
 racoon&whaleRigs1.blend
 racoon&whaleRigs.blend
+motion_data/
+texts/
+body_models/
+utils/
+bvh_output/
+bvh_output*
+bvh*
+HumanML3D/
+stats/
+*.bvh
 
 # Ignore archives everywhere
 *.zip
