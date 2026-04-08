@@ -118,14 +118,27 @@ class SceneParser:
         )
         return f"({formatted_values})"
 
+    def _get_root_bone(self, obj: object) -> object:
+        pose = getattr(obj, "pose", None)
+        if pose is None or not getattr(pose, "bones", None):
+            raise ValueError(f"Object `{obj.name}` does not have any pose bones.")
+
+        root_bones = [pose_bone for pose_bone in pose.bones if pose_bone.parent is None]
+        if not root_bones:
+            raise ValueError(f"Armature `{obj.name}` does not have a root pose bone.")
+
+        preferred_names = {"root", "master", "pelvis"}
+        for pose_bone in root_bones:
+            if pose_bone.name.lower() in preferred_names:
+                return pose_bone
+
+        return root_bones[0]
+
     def _format_root_directions(self, obj: object) -> str:
         if Vector is None:
             raise RuntimeError("SceneParser must be run inside Blender because mathutils is unavailable.")
 
-        try:
-            root_bone = obj.pose.bones["root"]
-        except KeyError:
-            root_bone = obj.pose.bones["master"]
+        root_bone = self._get_root_bone(obj)
         orientation = root_bone.matrix.to_3x3()  # world-space including rest pose
         forward = (orientation @ Vector((0.0, 1.0, 0.0))).normalized()
         right = (orientation @ Vector((1.0, 0.0, 0.0))).normalized()
