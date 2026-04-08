@@ -29,7 +29,7 @@ def dropdown_items(self, context):
     items = []
 
     for obj in context.scene.objects:
-        if obj.type == "MESH" or obj.type == "ARMATURE":
+        if obj.type == "ARMATURE":
             items.append((obj.name, obj.name, ""))
 
     return items
@@ -231,7 +231,12 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
         print("[Generator] Stage 2: Generating animation plan in background thread.")
         animation_plan = run_llm(object_name, object_json, prompt)
         plan_steps = split_animation_plan(animation_plan)
-
+#         animation_plan = [
+#         "a man picks up an unseen object to his front left and moves it to an unseen platform on this front right without moving his feet."
+# ]
+#         plan_steps = [
+#         "a man picks up an unseen object to his front left and moves it to an unseen platform on this front right without moving his feet."
+#     ]
         result_queue.put(
             {
                 "type": "plan",
@@ -623,8 +628,8 @@ def register():
     )
 
     bpy.types.Scene.gen_mode = bpy.props.EnumProperty(
-        name="Mode",
-        description="Select Mode",
+        name="Object",
+        description="Select Object",
         items=dropdown_items,
     )
 
