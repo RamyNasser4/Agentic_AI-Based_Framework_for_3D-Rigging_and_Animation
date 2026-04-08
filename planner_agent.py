@@ -1,14 +1,17 @@
 # Testing the Gemini API with a simple prompt to explain how AI works.
+import math
+import re
 from os import getenv
 from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain.chat_models import init_chat_model
 from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
 
 load_dotenv()
 
-# Updated Planner System Prompt to match the required step-by-step, joint-specific output
-PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner. Given a user's request, the object JSON hierarchy, and root directions, you will produce a clear, sequential plan detailing how to move the necessary joints to perform the given motion.
+# Updated Planner System Prompt to match the required step-by-step, joint-specific axis output
+PLANNER_SYSTEM_PROMPT = """You are an animation planner. Given a user's request, the object JSON hierarchy, and local axis basis, you will produce a clear, sequential plan detailing how to move the necessary joints to perform the given motion.
 
 # Angle Convention
 - All angles are CUMULATIVE from the object's initial resting pose.
@@ -17,10 +20,8 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
   the resulting cumulative angle stays within the joint's anatomical limits.
 - Distinguish LOCAL rotation from INHERITED rotation.
 - Effective rotation equals the sum of the hierarchy chain plus the joint's local rotation.
-- Rotation directions are strictly: "left", "right", "forward", "backward", "upward", "downward".
-  Never use "sideways", "laterally", "inward", "outward", or any other directional word.
-- "left" and "right" refer to the object's own local left/right axis.
-- "forward" and "backward" refer to the object's own local forward/backward axis.
+- Directions must use axis notation: +X, -X, +Y, -Y, +Z, -Z
+- These correspond to the object's local axes.
 - Never treat a later step as a fresh pose. Every step starts from the exact accumulated
   state produced by all previous steps.
 - Never implicitly reset a joint to 0 degrees unless an explicit opposite delta is written.
@@ -30,14 +31,14 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
 - Transformations propagate from parent to all descendants.
 - Never treat joints as independent.
 - Avoid stacking rotations across a chain:
-  BAD: rotating hip forward AND knee forward
+  BAD: rotating hip +Z AND knee +Z
   GOOD: hip drives motion, knee refines only
 - If a parent joint already produces motion:
-  child joints MUST NOT repeat the same directional rotation
+  child joints MUST NOT repeat the same axis rotation
 - Hinge joints (knee, elbow):
   - LOCAL articulation only
   - never used for global motion
-  - never duplicate parent direction
+  - never duplicate parent axis
 - Child joints may:
   - stay unchanged
   - apply SMALL corrective rotation (<= 50 percent of parent)
@@ -51,7 +52,7 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
 - A joint must never exceed its natural range of motion.
 - Example: a knee-equivalent joint can only bend in one direction — never let cumulative
   rotation cross 0° in the opposite (hyperextension) direction.
-- Example: a hip-equivalent joint has a forward range and a backward range — track both.
+- Example: a hip-equivalent joint can have both positive and negative range on a local axis — track both.
 - If a requested motion would break a limit, cap the rotation at the boundary instead.
 - Enforce these default cumulative limits unless the rig clearly implies a stricter limit:
   spine, neck, head, tail, ear, flipper, and similar flexible joints: [-45, +45] degrees.
@@ -70,10 +71,10 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
   explicitly requests a transition.
 
 # Symmetry Enforcement
-- For bilateral rigs, left and right joints must move in coordinated opposition or matched
+- For bilateral rigs, paired mirror joints must move in coordinated opposition or matched
   motion when the action is naturally symmetric, alternating, or support-based.
 - Unilateral motion is allowed when the request or object interaction clearly implies one-sided
-  action, but avoid unintended left-right drift in motions that should remain balanced.
+  action, but avoid unintended mirror drift in motions that should remain balanced.
 
 # Step Size Constraints
 - Limit every per-step joint rotation delta to a maximum of 20 degrees.
@@ -81,12 +82,12 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
 - If a larger total motion is needed, distribute it across multiple consecutive steps.
 
 # Phase-Based Motion (INTERNAL ONLY — never output phase labels or pattern lines)
-- Internally classify every step with a phase label: left_support, transition,
-  right_support, or cycle or motion for non-locomotion sequences.
+- Internally classify every step with a phase label: support_a, transition,
+  support_b, or cycle or motion for non-locomotion sequences.
 - For locomotion, internally maintain the repeating order:
-  left_support -> transition -> right_support -> transition.
-- Once the first 2 steps establish which side leads, do not randomly switch the leading
-  limb, leading side, or stroke order mid-sequence.
+  support_a -> transition -> support_b -> transition.
+- Once the first 2 steps establish which support side leads, do not randomly switch the leading
+  limb, support side, or stroke order mid-sequence.
 - Phase labels must NEVER appear in the output. They exist only to guide your internal
   reasoning about rhythm and balance.
 - Pattern lines must NEVER appear in the output.
@@ -113,10 +114,10 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
 - Output must be a series of numbered steps, each on a single line.
 - Format each step as: Step N: <semicolon-separated action phrases>
 - Do not output any phase labels, pattern lines, introductory text, or concluding text.
-- Every joint action must use simple directional language with exact numeric delta values
-  (e.g., "rotate left_hip backward 10 degrees", "move root forward 1 unit").
+- Every joint action must use axis notation with exact numeric delta values
+  (e.g., "rotate left_hip -Z 10 degrees", "move root +Z 1 units").
 - Root movement must always use an explicit numeric distance or unit value
-  (e.g., "Move root forward 1 unit").
+  (e.g., "move root +Z 1 units").
 - Prefer controlled rotation values in the 5 to 15 degree range for stable multi-step motion.
 - Prioritize higher-level joints closer to the root for primary motion.
 - Child joints are refinement only.
@@ -135,21 +136,21 @@ PLANNER_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT = """You are an animation planner.
   'slowly', or 'continuously' — use only directional language and exact numeric values.
 
 # Output format
-Step 1: Move root forward 1 unit; rotate left_hip backward 10 degrees; rotate right_hip forward 10 degrees;
-Step 2: Move root forward 1 unit; rotate left_hip forward 10 degrees; rotate right_hip backward 10 degrees;
-Step 3: Move root forward 1 unit; rotate left_hip forward 10 degrees; rotate right_hip backward 10 degrees;
-Step 4: Move root forward 1 unit; rotate left_hip backward 10 degrees; rotate right_hip forward 10 degrees;
+Step 1: move root +Z 1 units; rotate left_hip -Z 10 degrees; rotate right_hip +Z 10 degrees;
+Step 2: move root +Z 1 units; rotate left_hip +Z 10 degrees; rotate right_hip -Z 10 degrees;
+Step 3: move root +Z 1 units; rotate left_hip +Z 10 degrees; rotate right_hip -Z 10 degrees;
+Step 4: move root +Z 1 units; rotate left_hip -Z 10 degrees; rotate right_hip +Z 10 degrees;
 
 # Internal tracking format (do NOT output this — for your reasoning only)
 After each step, track: {{ joint_name: cumulative_angle, ... }} plus support limb, motion phase,
-and left-right symmetry state, and confirm no limit is violated and no implicit reset occurs.
+and mirror symmetry state, and confirm no limit is violated and no implicit reset occurs.
 
 # Strict Action Phrase Enforcement
 - Every action phrase MUST strictly follow exactly one of these 3-part formats:
   - Rotation: "rotate <joint_name> <direction> <number> degrees"
   - Translation: "move <joint_name> <direction> <number> units"
 - INSTRUCTION TYPE is limited to: move, rotate.
-- DIRECTION is limited to: forward, backward, left, right, upward, downward.
+- DIRECTION is limited to: +X, -X, +Y, -Y, +Z, -Z
 - MAGNITUDE is mandatory and must be numeric plus the correct required unit.
 - Every action MUST include ALL THREE components: instruction type, direction, and magnitude.
 - If any one of those three components is missing, the action is INVALID and must not appear.
@@ -159,8 +160,7 @@ and left-right symmetry state, and confirm no limit is violated and no implicit 
   "bend", "shift", and any other verb outside the allowed set.
 - NEVER output non-numeric magnitudes such as "slightly" or any other descriptive substitute
   for a number.
-- NEVER use any direction synonym outside the allowed set. Forbidden direction words include
-  "sideways", "inward", "outward", "up", and "down".
+- NEVER use any direction token outside the allowed set.
 - Before outputting each step, validate every action phrase against the exact required
   structure.
 - If ANY action phrase does not match the exact required structure, FIX it before output.
@@ -172,59 +172,20 @@ and left-right symmetry state, and confirm no limit is violated and no implicit 
   elsewhere in this prompt.
 """
 
-# Updated few shots with the specific step-by-step formatting
+# Updated few shots with the specific step-by-step axis formatting
 few_shots = [
     {
         "object": "racoon",
         "object_json": (
-            "name:metarig,position:(0.00,0.00,0.00),rotation:(-0.7,0.0,0.0,0.7),"
-            "children:[name:spine,position:(0.00,0.00,0.00),rotation:(0.7,0.0,0.0,0.7),"
-            "children:[name:pelvis.L,position:(0.00,0.00,0.00),rotation:(-0.2,0.6,0.7,0.4),"
-            "name:pelvis.R,position:(0.00,0.00,0.00),rotation:(0.2,0.6,0.7,-0.4),"
-            "name:spine.001,position:(0.00,0.00,0.00),rotation:(0.0,0.0,0.0,1.0),"
-            "children:[name:spine.002,position:(0.00,0.00,0.00),rotation:(0.0,0.0,0.0,1.0),"
-            "children:[name:spine.003,position:(0.00,0.00,0.00),rotation:(-0.1,0.0,0.0,1.0),"
-            "children:[name:breast.L,position:(0.00,0.00,0.00),rotation:(0.0,0.8,0.6,0.0),"
-            "name:breast.R,position:(0.00,0.00,0.00),rotation:(0.0,0.8,0.6,0.0),"
-            "name:shoulder.L,position:(0.00,0.00,0.00),rotation:(-0.7,0.2,0.4,0.6),"
-            "children:[name:upper_arm.L,position:(0.00,0.00,0.00),rotation:(0.2,-0.7,0.4,0.5),"
-            "children:[name:forearm.L,position:(0.00,0.00,0.00),rotation:(0.5,0.0,0.0,0.8),"
-            "children:[name:hand.L,position:(0.00,0.00,0.00),rotation:(0.1,0.0,-0.1,1.0)]]],"
-            "name:shoulder.R,position:(0.00,0.00,0.00),rotation:(-0.7,-0.2,-0.4,0.6),"
-            "children:[name:upper_arm.R,position:(0.00,0.00,0.00),rotation:(-0.1,0.9,-0.3,0.4),"
-            "children:[name:forearm.R,position:(0.00,0.00,0.00),rotation:(-0.1,0.2,-0.6,0.8),"
-            "children:[name:hand.R,position:(0.00,0.00,0.00),rotation:(0.1,0.1,-0.2,1.0),"
-            "children:[name:hand.R.001,position:(0.00,0.00,0.00),rotation:(0.3,0.0,0.7,0.6),"
-            "children:[name:Spork_low,position:(0.00,0.00,0.00),rotation:(0.0,0.7,-0.7,0.1)"
-            "]]]]],"
-            "name:spine.006,position:(0.00,0.00,0.00),rotation:(-0.1,0.0,0.0,1.0),"
-            "children:[name:ear.L,position:(0.00,0.01,0.00),rotation:(-0.1,-0.1,0.2,1.0),"
-            "name:ear.R,position:(0.00,0.01,0.00),rotation:(-0.1,0.1,-0.5,0.9)"
-            "]]]]]],"
-            "name:tail,position:(0.00,0.00,0.00),rotation:(0.8,0.4,-0.1,-0.3),"
-            "children:[name:tail.001,position:(0.00,0.00,0.00),rotation:(-0.2,0.1,-0.2,1.0),"
-            "children:[name:tail.002,position:(0.00,0.00,0.00),rotation:(0.0,0.5,-0.5,0.7),"
-            "children:[name:tail.003,position:(0.00,0.00,0.00),rotation:(-0.5,0.0,0.0,0.8)"
-            "]]],"
-            "name:thigh.L,position:(0.00,0.00,0.00),rotation:(1.0,0.1,-0.3,0.0),"
-            "children:[name:shin.L,position:(0.00,0.00,0.00),rotation:(0.2,0.3,-0.1,0.9),"
-            "children:[name:foot.L,position:(0.00,0.00,0.00),rotation:(-0.5,0.1,0.2,0.8),"
-            "children:[name:heel.02.L,position:(0.00,0.00,0.00),rotation:(-0.6,0.6,-0.2,-0.5),"
-            "name:toe.L,position:(0.00,0.00,0.00),rotation:(-0.3,0.8,-0.4,-0.3)"
-            "]]],"
-            "name:thigh.R,position:(0.00,0.00,0.00),rotation:(1.0,-0.1,0.3,0.0),"
-            "children:[name:shin.R,position:(0.00,0.00,0.00),rotation:(0.2,-0.3,0.1,0.9),"
-            "children:[name:foot.R,position:(0.00,0.00,0.00),rotation:(-0.5,-0.1,-0.2,0.8),"
-            "children:[name:heel.02.R,position:(0.00,0.00,0.00),rotation:(0.6,0.6,-0.2,0.5),"
-            "name:toe.R,position:(0.00,0.00,0.00),rotation:(0.3,0.8,-0.4,0.3)"
-            "]]]]]]"
+           """name:metarig,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine.001,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine.002,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine.003,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine.006,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:ear.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:ear.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.3,0.9)],name:shoulder.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:upper_arm.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:forearm.L,position:(0.0,0.0,0.0),rotation:(0.4,0.0,0.0,0.9),children:[name:hand.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:shoulder.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:upper_arm.R,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.3,0.9),children:[name:forearm.R,position:(0.0,0.0,0.0),rotation:(-0.2,-0.1,0.6,0.7),children:[name:hand.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.2,1.0),children:[name:hand.R.001,position:(0.0,-0.2,0.0),rotation:(0.0,0.0,-0.1,1.0)]]]],name:breast.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:breast.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:pelvis.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:pelvis.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:thigh.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:shin.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:foot.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:toe.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:heel.02.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:thigh.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:shin.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:foot.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:toe.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:heel.02.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:tail,position:(0.0,0.0,0.0),rotation:(-0.2,0.3,0.2,0.9),children:[name:tail.001,position:(0.0,0.0,0.0),rotation:(-0.3,0.0,0.2,0.9),children:[name:tail.002,position:(0.0,0.0,0.0),rotation:(0.0,-0.5,0.5,0.7),children:[name:tail.003,position:(0.0,0.0,0.0),rotation:(-0.6,0.0,0.0,0.8)]]]]]
+Root axis +Z: (0.0, 0.0, 1.0); axis +X: (1.0, 0.0, 0.0); axis +Y: (0.0, -1.0, 0.0)"""
         ),
         "user_prompt": "Animate the raccoon standing still while nodding its head up and down.",
         "plan": (
-            "Step 1: Rotate spine.006 forward 10 degrees; rotate tail upward 5 degrees;"
-            "Step 2: Rotate spine.006 backward 20 degrees; rotate tail downward 10 degrees;"
-            "Step 3: Rotate spine.006 forward 20 degrees; rotate tail upward 10 degrees;"
-            "Step 4: Rotate spine.006 backward 10 degrees; rotate tail downward 5 degrees;"
+            "Step 1: Rotate spine.006 +Z 10 degrees; rotate tail +Y 5 degrees;"
+            "Step 2: Rotate spine.006 -Z 10 degrees; rotate tail -Y 10 degrees;"
+            "Step 3: Rotate spine.006 +Z 10 degrees; rotate tail +Y 10 degrees;"
+            "Step 4: Rotate spine.006 -Z 10 degrees; rotate tail -Y 5 degrees;"
         ),
     },
     {
@@ -235,14 +196,14 @@ few_shots = [
             "children:[name:Tail,position:(0.0000,0.0196,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Tail_end,position:(0.0000,0.0133,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]],name:TopFlipper.L,position:(-0.0107,0.0087,-0.0087),rotation:(-0.4,0.0,0.3,0.9),children:[name:MidFlipper.L,position:(0.0000,0.0067,0.0000),rotation:(0.0,0.1,0.0,1.0)," 
             "children:[name:BottomFlipper.L,position:(0.0000,0.0043,0.0000),rotation:(0.0,0.0,-0.1,1.0),children:[name:BottomFlipper.L_end,position:(0.0000,0.0076,0.0000),rotation:(0.0,0.0,0.0,1.0)]]],name:TopFlipper.R,position:(0.0092,0.0078,-0.0084),rotation:(-0.4,0.0,-0.3,0.9),children:[name:MidFlipper.R,position:(0.0000,0.0082,0.0000),rotation:(0.1,-0.1,0.1,1.0)," 
             "children:[name:BottomFlipper.R,position:(0.0000,0.0053,0.0000),rotation:(0.0,0.0,0.2,1.0),children:[name:BottomFlipper.R_end,position:(0.0000,0.0072,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]]]]. " 
-            "Root forward direction: (0.00, 1.00, 0.00); right direction: (1.00, 0.00, 0.00); up direction: (0.00, 0.00,-1.00). "
+            "Root axis +Z: (0.00, 1.00, 0.00); axis +X: (1.00, 0.00, 0.00); axis +Y: (0.00, 0.00,-1.00). "
         ),
         "user_prompt": "Create a swim animation for the whale.",
         "plan": (
-            "Step 1: Move Armature forward 1 unit; rotate Spine1 downward 10 degrees; rotate Spine2 downward 5 degrees; rotate Head upward 5 degrees; rotate TopFlipper.L backward 10 degrees; rotate TopFlipper.R backward 10 degrees; rotate Tail downward 10 degrees;"
-            "Step 2: Move Armature forward 1 unit; rotate Spine1 upward 20 degrees; rotate Spine2 upward 10 degrees; rotate Spine3 upward 5 degrees; rotate TopFlipper.L forward 20 degrees; rotate TopFlipper.R forward 20 degrees; rotate Tail upward 15 degrees;"
-            "Step 3: Move Armature forward 1 unit; rotate Spine1 downward 20 degrees; rotate Spine2 downward 10 degrees; rotate Spine3 downward 5 degrees; rotate Head downward 10 degrees; rotate TopFlipper.L backward 20 degrees; rotate TopFlipper.R backward 20 degrees; rotate Tail downward 15 degrees;"
-            "Step 4: Move Armature forward 1 unit; rotate Spine1 upward 10 degrees; rotate Spine2 upward 5 degrees; rotate Head upward 5 degrees; rotate TopFlipper.L forward 10 degrees; rotate TopFlipper.R forward 10 degrees; rotate Tail upward 10 degrees;"
+            "Step 1: Move Armature +Z 1 units; rotate Spine1 -Y 10 degrees; rotate Spine2 -Y 5 degrees; rotate Head +Y 5 degrees; rotate TopFlipper.L -Z 10 degrees; rotate TopFlipper.R -Z 10 degrees; rotate Tail -Y 10 degrees;"
+            "Step 2: Move Armature +Z 1 units; rotate Spine1 +Y 20 degrees; rotate Spine2 +Y 10 degrees; rotate Spine3 +Y 5 degrees; rotate TopFlipper.L +Z 20 degrees; rotate TopFlipper.R +Z 20 degrees; rotate Tail +Y 15 degrees;"
+            "Step 3: Move Armature +Z 1 units; rotate Spine1 -Y 20 degrees; rotate Spine2 -Y 10 degrees; rotate Spine3 -Y 5 degrees; rotate Head -Y 10 degrees; rotate TopFlipper.L -Z 20 degrees; rotate TopFlipper.R -Z 20 degrees; rotate Tail -Y 15 degrees;"
+            "Step 4: Move Armature +Z 1 units; rotate Spine1 +Y 10 degrees; rotate Spine2 +Y 5 degrees; rotate Head +Y 5 degrees; rotate TopFlipper.L +Z 10 degrees; rotate TopFlipper.R +Z 10 degrees; rotate Tail +Y 10 degrees;"
         )
     },
 ]
@@ -285,16 +246,25 @@ def get_llm(model: str):
     #     api_key=getenv("OPENROUTER_API_KEY"),
     #     temperature=0,
     # )
-    return init_chat_model(
-                model="gpt-5-mini",
-                model_provider="openai",
-                base_url="http://localhost:4000/v1/",
-                api_key="nothing",
-                default_headers={
-                    # "HTTP-Referer": getenv("YOUR_SITE_URL"),
-                    # "X-OpenRouter-Title": getenv("YOUR_SITE_NAME"),
-                },
-            )
+    # return init_chat_model(
+    #             model="gpt-5-mini",
+    #             model_provider="openai",
+    #             base_url="http://localhost:4000/v1/",
+    #             api_key="nothing",
+    #             temperature=0.6,
+    #             max_tokens=1200, 
+    #             default_headers={
+    #                 # "HTTP-Referer": getenv("YOUR_SITE_URL"),
+    #                 # "X-OpenRouter-Title": getenv("YOUR_SITE_NAME"),
+    #             },
+    #         )
+      return ChatOpenAI(
+                  model="gpt-5.4-mini",
+                  base_url="http://localhost:4000/v1",
+                  api_key="nothing",
+                  temperature=0.5,
+                  use_responses_api=True,
+              )
 example_prompt = ChatPromptTemplate.from_messages([
     ("human", "Object: **{object}**. Object JSON: {object_json}. Request: {user_prompt}."),
     ("ai", "{plan}"),
@@ -315,6 +285,179 @@ prompt_template = ChatPromptTemplate.from_messages([
         "The user's request is: {user_prompt}."
     )),
 ])
+
+
+class QuaternionConverter:
+    _STEP_PATTERN = re.compile(
+        r"Step\s+(\d+)\s*:\s*(.*?)(?=Step\s+\d+\s*:|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+    _ROTATE_PATTERN = re.compile(
+        r"^(?:rotate|Rotate)\s+(.+?)\s+"
+        r"([+-][XYZ])\s+"
+        r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+degrees$",
+    )
+    _MOVE_PATTERN = re.compile(
+        r"^(?:move|Move)\s+.+?\s+"
+        r"([+-][XYZ])\s+"
+        r"([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+units$",
+    )
+
+    def __init__(
+        self,
+        forward_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+        right_axis: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        up_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    ):
+        self.forward_axis = self._normalize_axis(forward_axis, "forward_axis")
+        self.right_axis = self._normalize_axis(right_axis, "right_axis")
+        self.up_axis = self._normalize_axis(up_axis, "up_axis")
+        self.current_quaternions: dict[str, tuple[float, float, float, float]] = {}
+
+    def _normalize_axis(
+        self,
+        axis: tuple[float, float, float],
+        axis_name: str,
+    ) -> tuple[float, float, float]:
+        if len(axis) != 3:
+            raise ValueError(f"{axis_name} must contain exactly 3 values.")
+
+        x, y, z = (float(value) for value in axis)
+        magnitude = math.sqrt((x * x) + (y * y) + (z * z))
+        if magnitude == 0.0:
+            raise ValueError(f"{axis_name} must be a non-zero vector.")
+
+        return (x / magnitude, y / magnitude, z / magnitude)
+
+    def parse_plan(self, text: str) -> list[dict]:
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Plan text must be a non-empty string.")
+
+        steps = []
+        for match in self._STEP_PATTERN.finditer(text.strip()):
+            step_number = int(match.group(1))
+            action_block = match.group(2).strip()
+            if not action_block:
+                raise ValueError(f"Step {step_number} is malformed.")
+
+            actions = []
+            for raw_action in action_block.split(";"):
+                action = raw_action.strip()
+                if not action:
+                    continue
+
+                rotate_match = self._ROTATE_PATTERN.fullmatch(action)
+                if rotate_match:
+                    joint_name = rotate_match.group(1).strip()
+                    direction = rotate_match.group(2)
+                    degrees = float(rotate_match.group(3))
+                    actions.append(
+                        {
+                            "joint_name": joint_name,
+                            "direction": direction,
+                            "degrees": degrees,
+                        }
+                    )
+                    continue
+
+                if self._MOVE_PATTERN.fullmatch(action):
+                    continue
+
+                raise ValueError(f"Malformed action in Step {step_number}: {action}")
+
+            steps.append({"step_number": step_number, "actions": actions})
+
+        if not steps:
+            raise ValueError("No valid steps were found in the plan text.")
+
+        return steps
+
+    def direction_to_axis(self, direction: str) -> tuple[float, float, float]:
+        if not re.fullmatch(r"[+-][XYZ]", direction):
+            raise ValueError(f"Invalid direction: {direction}")
+
+        axis_map = {
+            "X": self.right_axis,
+            "Y": self.up_axis,
+            "Z": self.forward_axis,
+        }
+        sign = 1 if direction[0] == "+" else -1
+        axis_letter = direction[1]
+        base_axis = axis_map[axis_letter]
+        return tuple(sign * value for value in base_axis)
+
+    def axis_angle_to_quaternion(
+        self,
+        axis: tuple[float, float, float],
+        angle_rad: float,
+    ) -> tuple[float, float, float, float]:
+        x, y, z = self._normalize_axis(axis, "axis")
+        half_angle = angle_rad / 2.0
+        sin_half = math.sin(half_angle)
+        cos_half = math.cos(half_angle)
+        return (x * sin_half, y * sin_half, z * sin_half, cos_half)
+
+    def multiply_quaternions(
+        self,
+        q1: tuple[float, float, float, float],
+        q2: tuple[float, float, float, float],
+    ) -> tuple[float, float, float, float]:
+        x1, y1, z1, w1 = q1
+        x2, y2, z2, w2 = q2
+
+        return (
+            (w1 * x2) + (x1 * w2) + (y1 * z2) - (z1 * y2),
+            (w1 * y2) - (x1 * z2) + (y1 * w2) + (z1 * x2),
+            (w1 * z2) + (x1 * y2) - (y1 * x2) + (z1 * w2),
+            (w1 * w2) - (x1 * x2) - (y1 * y2) - (z1 * z2),
+        )
+
+    def normalize_quaternion(
+        self,
+        q: tuple[float, float, float, float],
+    ) -> tuple[float, float, float, float]:
+        x, y, z, w = q
+        magnitude = math.sqrt((x * x) + (y * y) + (z * z) + (w * w))
+        if magnitude == 0.0:
+            raise ValueError("Quaternion magnitude cannot be zero.")
+        return (x / magnitude, y / magnitude, z / magnitude, w / magnitude)
+
+    def apply_step(self, step: dict) -> list[tuple[str, tuple[float, float, float, float]]]:
+        if "step_number" not in step or "actions" not in step:
+            raise ValueError("Malformed step structure.")
+
+        applied_rotations = []
+        for action in step["actions"]:
+            joint_name = action["joint_name"]
+            direction = action["direction"]
+            degrees = action["degrees"]
+
+            axis = self.direction_to_axis(direction)
+            angle_rad = math.radians(degrees)
+            q_new = self.axis_angle_to_quaternion(axis, angle_rad)
+            q_previous = self.current_quaternions.get(joint_name, (0.0, 0.0, 0.0, 1.0))
+            q_total = self.multiply_quaternions(q_new, q_previous)
+            q_total = self.normalize_quaternion(q_total)
+
+            self.current_quaternions[joint_name] = q_total
+            applied_rotations.append((joint_name, q_total))
+
+        return applied_rotations
+
+    def process(self, plan_text: str) -> str:
+        self.current_quaternions = {}
+        steps = self.parse_plan(plan_text)
+        output_lines = []
+
+        for step in steps:
+            output_lines.append(f"Step {step['step_number']}:")
+            for joint_name, quaternion in self.apply_step(step):
+                qx, qy, qz, qw = quaternion
+                output_lines.append(
+                    f"{joint_name}, ({qx:.6f}, {qy:.6f}, {qz:.6f}, {qw:.6f})"
+                )
+
+        return "\n".join(output_lines)
 
 class PlannerAgent:
     def __init__(self, models=None):
