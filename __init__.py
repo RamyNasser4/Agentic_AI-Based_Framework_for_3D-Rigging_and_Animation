@@ -42,7 +42,10 @@ def split_animation_plan(plan_text):
 
     grouped_steps = []
     current_step = []
-    step_header = re.compile(r"^(?:step\s*\d+\s*:|\d+[\.\)])\s*", re.IGNORECASE)
+    step_header = re.compile(
+        r"^(?:\[generator\]\s*plan\s*step\s*\d+\s*:|step\s*\d+\s*:|\d+[\.\)])\s*",
+        re.IGNORECASE,
+    )
 
     for line in lines:
         if step_header.match(line):
@@ -66,6 +69,19 @@ def split_animation_plan(plan_text):
     return cleaned_steps
 
 
+def format_plan_step(step_text, step_index):
+    cleaned_step = str(step_text or "").strip()
+    cleaned_step = re.sub(
+        r"^\sStep\s*\d+\s*:\s*",
+        "",
+        cleaned_step,
+        flags=re.IGNORECASE,
+    )
+    cleaned_step = re.sub(r"^\s*Step\s*\d+\s*:\s*", "", cleaned_step, flags=re.IGNORECASE)
+    cleaned_step = re.sub(r"\s+", " ", cleaned_step).strip()
+    return f"Step {step_index}: {cleaned_step}"
+
+
 def load_keyframe_agent_class():
     try:
         from .keyframe_agent import KeyFrameAgent
@@ -81,7 +97,7 @@ def load_keyframe_agent_class():
 
         module_ast = ast.parse(source, filename=module_path)
         allowed_nodes = []
-        allowed_assignments = {"SYSTEM_MESSAGE", "animation_examples"}
+        allowed_assignments = {"SYSTEM_MESSAGE", "REPAIR_SYSTEM_MESSAGE", "animation_examples"}
 
         for node in module_ast.body:
             if isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef)):
@@ -225,18 +241,42 @@ def _queue_worker_error(result_queue, message, item_type="error", **extra):
     result_queue.put(payload)
 
 
+def _queue_refinement_status(
+    result_queue,
+    status,
+    current_instruction="",
+    log=None,
+    animate=False,
+    **extra,
+):
+    payload = {
+        "type": "refinement_status",
+        "status": status,
+        "current_instruction": current_instruction,
+        "log": log,
+        "animate": animate,
+    }
+    payload.update(extra)
+    result_queue.put(payload)
+
+
 def _generation_worker(request_queue, result_queue, object_name, object_json, prompt):
     try:
         print(f"[Generator] Worker started for object `{object_name}`.")
         print("[Generator] Stage 2: Generating animation plan in background thread.")
         animation_plan = run_llm(object_name, object_json, prompt)
+        print(animation_plan)
         plan_steps = split_animation_plan(animation_plan)
-#         animation_plan = [
-#         "a man picks up an unseen object to his front left and moves it to an unseen platform on this front right without moving his feet."
-# ]
-#         plan_steps = [
-#         "a man picks up an unseen object to his front left and moves it to an unseen platform on this front right without moving his feet."
-#     ]
+
+        if not plan_steps:
+            fallback_step = str(prompt).strip()
+            plan_steps = [fallback_step] if fallback_step else []
+            if plan_steps:
+                animation_plan = "\n".join(
+                    f"Step {index}: {step}"
+                    for index, step in enumerate(plan_steps, start=1)
+                )
+
         result_queue.put(
             {
                 "type": "plan",
@@ -268,8 +308,11 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                 continue
 
             index = request["index"]
-            instruction = request["step"]
+            current_plan_step = request["current_plan_step"]
             previous_animation = request.get("previous_animation")
+            plan_history = request.get("plan_history")
+            last_step_index = request.get("last_step_index")
+            user_instruction = request.get("user_instruction")
 
             print(f"[Generator] Worker generating keyframes for step {index}.")
 
@@ -278,7 +321,10 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                     {
                         "object": object_name,
                         "object_json": request["object_json"],
-                        "instruction": instruction,
+                        "user_instruction": user_instruction,
+                        "current_plan_step": current_plan_step,
+                        "plan_history": plan_history,
+                        "last_step_index": last_step_index,
                         "previous_animation": previous_animation,
                     }
                 )
@@ -290,7 +336,7 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                     f"Keyframe generation failed for step {index}: {error}",
                     item_type="step_error",
                     index=index,
-                    step=instruction,
+                    step=current_plan_step,
                 )
                 continue
 
@@ -301,7 +347,7 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                     f"Keyframe generation returned no result for step {index}.",
                     item_type="step_error",
                     index=index,
-                    step=instruction,
+                    step=current_plan_step,
                 )
                 continue
 
@@ -309,10 +355,36 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                 {
                     "type": "step_result",
                     "index": index,
-                    "step": instruction,
+                    "step": current_plan_step,
                     "response": response,
                 }
             )
+    except Exception as error:
+        print("[Generator] Worker thread failed:")
+        print(traceback.format_exc())
+        _queue_worker_error(result_queue, f"Generation failed: {error}")
+
+
+def _refinement_worker(request_queue, result_queue, object_name, object_json, prompt):
+    try:
+        print(f"[Generator] Worker started for object `{object_name}`.")
+        print(f"[Generator] Refinement worker started for object `{object_name}`.")
+        plan, keyframes, feedback = run_with_refinement(
+            prompt,
+            object_name=object_name,
+            object_json=object_json,
+            request_queue=request_queue,
+            result_queue=result_queue,
+            debug=True,
+        )
+        result_queue.put(
+            {
+                "type": "refinement_complete",
+                "plan": plan,
+                "keyframes": keyframes,
+                "feedback": feedback,
+            }
+        )
     except Exception as error:
         print("[Generator] Worker thread failed:")
         print(traceback.format_exc())
@@ -331,7 +403,12 @@ def _execute_generation_step(scene, job_state, item):
         print(f"[Generator] Stage 5.{index}: Executing keyframes in Blender.")
         job_state["executor"].execute_from_text(response)
         print(f"[Generator] Blender execution completed for step {index}.")
-        job_state["previous_animation"] = response
+        job_state["all_outputs"].append(response)
+        job_state["previous_animation"] = "\n".join(
+            output for output in job_state["all_outputs"] if str(output).strip()
+        )
+        job_state["plan_history"].append(step)
+        job_state["final_animation"] = job_state["previous_animation"]
         job_state["step_logs"].append(f"Executed Step {index}: {step}")
     except Exception as error:
         print(f"[Generator] Blender execution failed for step {index}: {error}")
@@ -351,9 +428,65 @@ def _execute_generation_step(scene, job_state, item):
         _finalize_generation(scene, job_state)
         return
 
-    job_state["current_instruction"] = job_state["steps"][job_state["current_step"]]
+    next_step_index = job_state["current_step"] + 1
+    job_state["current_instruction"] = format_plan_step(
+        job_state["steps"][job_state["current_step"]],
+        next_step_index,
+    )
     _set_status(job_state, f"Step {index} complete")
     _refresh_scene_output(scene, job_state)
+
+
+def _execute_refinement_iteration(scene, job_state, item):
+    from .skeleton_recorder import extract_skeleton_frames
+
+    iteration = item["iteration"]
+    keyframes = item["keyframes"]
+
+    job_state["current_step"] = iteration
+    job_state["current_instruction"] = f"Iteration {iteration}"
+    job_state["waiting_for_llm"] = False
+    _set_status(job_state, f"Executing iteration {iteration}")
+    _refresh_scene_output(scene, job_state)
+
+    try:
+        print(f"[Generator] Refinement Stage {iteration}: Executing keyframes in Blender.")
+        job_state["executor"].execute_from_text(
+            keyframes,
+            armature_name=job_state["object_name"],
+            clear_existing_action=True,
+        )
+        print(f"[Generator] Refinement Blender execution completed for iteration {iteration}.")
+        job_state["final_animation"] = keyframes
+        job_state["previous_animation"] = keyframes
+
+        _set_status(job_state, "Rendering skeleton frames")
+        _refresh_scene_output(scene, job_state)
+        print(f"[Generator] Refinement Stage {iteration}: Extracting skeleton frames in Blender.")
+        skeleton_frames = extract_skeleton_frames(job_state["object_name"])
+        print(f"[Generator] Skeleton extraction completed for iteration {iteration}.")
+
+        job_state["request_queue"].put(
+            {
+                "type": "refinement_iteration_data",
+                "iteration": iteration,
+                "skeleton_frames": skeleton_frames,
+            }
+        )
+    except Exception as error:
+        print(f"[Generator] Refinement iteration {iteration} failed in Blender: {error}")
+        print(traceback.format_exc())
+        job_state["step_logs"].append(f"Refinement iteration {iteration} failed: {error}")
+        job_state["request_queue"].put(
+            {
+                "type": "refinement_iteration_error",
+                "iteration": iteration,
+                "message": str(error),
+            }
+        )
+        _set_status(job_state, f"Refinement iteration {iteration} failed")
+        _refresh_scene_output(scene, job_state)
+        _finalize_generation(scene, job_state)
 
 
 def _dispatch_next_step(scene, job_state):
@@ -366,7 +499,8 @@ def _dispatch_next_step(scene, job_state):
 
     step_index = job_state["current_step"] + 1
     instruction = job_state["steps"][job_state["current_step"]]
-    job_state["current_instruction"] = instruction
+    current_plan_step = format_plan_step(instruction, step_index)
+    job_state["current_instruction"] = current_plan_step
 
     _set_status(job_state, f"Parsing scene for Step {step_index}")
     _refresh_scene_output(scene, job_state)
@@ -389,7 +523,10 @@ def _dispatch_next_step(scene, job_state):
         {
             "type": "step",
             "index": step_index,
-            "step": instruction,
+            "current_plan_step": current_plan_step,
+            "plan_history": list(job_state["plan_history"]),
+            "last_step_index": len(job_state["plan_history"]),
+            "user_instruction": job_state["user_prompt"],
             "object_json": object_json,
             "previous_animation": job_state["previous_animation"],
         }
@@ -423,7 +560,11 @@ def _handle_generation_queue(scene):
             _animate_waiting_status(scene, job_state)
             return _TIMER_INTERVAL
 
-        if job_state["plan_ready"] and job_state["current_step"] < job_state["total_steps"]:
+        if (
+            job_state.get("mode") != "refinement"
+            and job_state["plan_ready"]
+            and job_state["current_step"] < job_state["total_steps"]
+        ):
             _dispatch_next_step(scene, job_state)
             return _TIMER_INTERVAL if _get_generation_job(scene) is not None else None
 
@@ -436,11 +577,59 @@ def _handle_generation_queue(scene):
         job_state["steps"] = item["steps"]
         job_state["total_steps"] = len(item["steps"])
         job_state["plan_ready"] = True
-        job_state["current_instruction"] = job_state["steps"][0] if job_state["steps"] else ""
+        job_state["current_instruction"] = (
+            format_plan_step(job_state["steps"][0], 1) if job_state["steps"] else ""
+        )
         job_state["step_logs"].append(f"Planner returned {job_state['total_steps']} step(s).")
         _set_status(job_state, f"Plan ready ({job_state['total_steps']} steps)")
         _refresh_scene_output(scene, job_state)
         return _TIMER_INTERVAL
+
+    if item_type == "refinement_status":
+        job_state["waiting_for_llm"] = bool(item.get("animate", False))
+        if item.get("current_instruction") is not None:
+            job_state["current_instruction"] = item.get("current_instruction") or job_state["current_instruction"]
+        log_message = item.get("log")
+        if log_message:
+            job_state["step_logs"].append(log_message)
+        _set_status(job_state, item["status"], animate=bool(item.get("animate", False)))
+        _refresh_scene_output(scene, job_state)
+        return _TIMER_INTERVAL
+
+    if item_type == "refinement_plan":
+        job_state["plan_text"] = item["plan"]
+        job_state["steps"] = item.get("steps", [])
+        job_state["plan_ready"] = True
+        job_state["step_logs"].append(f"Initial planner returned {len(job_state['steps'])} step(s).")
+        _set_status(job_state, "Generating keyframes", animate=True)
+        _refresh_scene_output(scene, job_state)
+        return _TIMER_INTERVAL
+
+    if item_type == "refinement_execute":
+        _execute_refinement_iteration(scene, job_state, item)
+        return _TIMER_INTERVAL if _get_generation_job(scene) is not None else None
+
+    if item_type == "refinement_complete":
+        job_state["waiting_for_llm"] = False
+        print("[Generator] Refinement completed.")
+        job_state["plan_text"] = item["plan"]
+        job_state["final_plan"] = item["plan"]
+        job_state["final_keyframes"] = item["keyframes"]
+        job_state["final_feedback"] = item["feedback"]
+        job_state["final_animation"] = item["keyframes"]
+        job_state["previous_animation"] = item["keyframes"]
+        job_state["all_outputs"] = [item["keyframes"]]
+
+        faithfulness_score = float(item["feedback"].get("faithfulness", {}).get("score", 0.0))
+        realism_score = float(item["feedback"].get("realism", {}).get("score", 0.0))
+        job_state["step_logs"].append(
+            f"Final feedback: faithfulness={faithfulness_score:.3f}, realism={realism_score:.3f}"
+        )
+        job_state["current_instruction"] = ""
+        _set_status(job_state, "Completed")
+        _refresh_scene_output(scene, job_state)
+        _finalize_generation(scene, job_state)
+        return None
 
     if item_type == "step_result":
         job_state["waiting_for_llm"] = False
@@ -480,6 +669,213 @@ def _resolve_target_object_name(context, scene):
     if context.active_object is not None:
         return context.active_object.name
     return ""
+
+
+def run_with_refinement(
+    prompt,
+    object_name=None,
+    scene=None,
+    max_iters=4,
+    score_threshold=0.9,
+    debug=False,
+    object_json=None,
+    request_queue=None,
+    result_queue=None,
+):
+    from .SceneParser import SceneParser
+    from .critic_agent import evaluate_motion
+    from .refinement import generate_keyframes_for_plan, refine
+    from .skeleton_recorder import extract_skeleton_frames
+    from .skeleton_visualizer import render_skeleton_images
+
+    queue_mode = request_queue is not None and result_queue is not None
+    active_scene = None if queue_mode else scene or bpy.context.scene
+    active_object_name = object_name
+    if not active_object_name and active_scene is not None:
+        active_object_name = _resolve_target_object_name(bpy.context, active_scene)
+    if not active_object_name:
+        raise ValueError("run_with_refinement requires an armature object name.")
+
+    if object_json is None:
+        if queue_mode:
+            raise ValueError("Queue-based run_with_refinement requires pre-parsed object_json.")
+        parser = SceneParser(precision=1)
+        object_json = parser.generate_object_json([active_object_name])
+
+    executor = None if queue_mode else BlenderExecutor()
+
+    if result_queue is not None:
+        _queue_refinement_status(result_queue, "Generating plan", animate=True)
+
+    print("[Generator] Stage 2: Generating animation plan in background thread.")
+    plan = run_llm(active_object_name, object_json, prompt)
+    print(plan)
+    plan_steps = split_animation_plan(plan)
+    if result_queue is not None:
+        result_queue.put(
+            {
+                "type": "refinement_plan",
+                "plan": str(plan),
+                "steps": list(plan_steps),
+            }
+        )
+
+    if result_queue is not None:
+        _queue_refinement_status(result_queue, "Generating keyframes", animate=True)
+    print("[Generator] Stage 3: Generating keyframes for refinement.")
+    keyframes = generate_keyframes_for_plan(
+        object_name=active_object_name,
+        object_json=object_json,
+        prompt=prompt,
+        plan_text=plan,
+    )
+
+    previous_score = 0.0
+    feedback = {
+        "faithfulness": {"score": 0.0, "issues": []},
+        "realism": {"score": 0.0, "issues": []},
+        "priority_fixes": [],
+    }
+
+    for iteration in range(1, int(max_iters) + 1):
+        if result_queue is not None:
+            _queue_refinement_status(
+                result_queue,
+                f"Executing iteration {iteration}",
+                current_instruction=f"Iteration {iteration}",
+            )
+
+        if queue_mode:
+            skeleton_frames = _request_refinement_iteration_execution(
+                request_queue=request_queue,
+                result_queue=result_queue,
+                iteration=iteration,
+                keyframes=keyframes,
+            )
+        else:
+            print(f"[Generator] Refinement Stage {iteration}: Executing keyframes in Blender.")
+            executor.execute_from_text(
+                keyframes,
+                armature_name=active_object_name,
+                clear_existing_action=True,
+            )
+            print(f"[Generator] Refinement Blender execution completed for iteration {iteration}.")
+            print(f"[Generator] Refinement Stage {iteration}: Extracting skeleton frames in Blender.")
+            skeleton_frames = extract_skeleton_frames(active_object_name)
+
+        if result_queue is not None:
+            _queue_refinement_status(
+                result_queue,
+                "Rendering skeleton frames",
+                current_instruction=f"Iteration {iteration}",
+            )
+        print(f"[Generator] Refinement Stage {iteration}: Rendering skeleton frames.")
+        images = render_skeleton_images(skeleton_frames)
+
+        if result_queue is not None:
+            _queue_refinement_status(
+                result_queue,
+                "Evaluating motion",
+                current_instruction=f"Iteration {iteration}",
+                animate=True,
+            )
+        print(f"[Generator] Refinement Stage {iteration}: Evaluating motion.")
+        feedback = evaluate_motion(prompt, images)
+
+        faithfulness_score = float(feedback.get("faithfulness", {}).get("score", 0.0))
+        realism_score = float(feedback.get("realism", {}).get("score", 0.0))
+        score = (faithfulness_score + realism_score) / 2.0
+
+        faithfulness_issues = feedback.get("faithfulness", {}).get("issues", [])
+        realism_issues = feedback.get("realism", {}).get("issues", [])
+        issue_count = len(faithfulness_issues) + len(realism_issues)
+
+        if debug:
+            print(
+                "[Refinement] "
+                f"iteration={iteration} "
+                f"faithfulness={faithfulness_score:.3f} "
+                f"realism={realism_score:.3f} "
+                f"issues={issue_count}"
+            )
+        if result_queue is not None:
+            _queue_refinement_status(
+                result_queue,
+                f"Iteration {iteration} evaluated",
+                current_instruction=f"Iteration {iteration}",
+                log=(
+                    f"Iteration {iteration}: "
+                    f"faithfulness={faithfulness_score:.3f}, "
+                    f"realism={realism_score:.3f}, "
+                    f"issues={issue_count}"
+                ),
+            )
+
+        if iteration > 1 and score <= previous_score:
+            print(f"[Refinement] Stopping because score did not improve at iteration {iteration}.")
+            break
+
+        if faithfulness_score > score_threshold and realism_score > score_threshold:
+            print(f"[Refinement] Stopping because threshold was reached at iteration {iteration}.")
+            break
+
+        if iteration >= int(max_iters):
+            print(f"[Refinement] Stopping because max iterations was reached at iteration {iteration}.")
+            break
+
+        if result_queue is not None:
+            _queue_refinement_status(
+                result_queue,
+                "Generating plan fixes",
+                current_instruction=f"Iteration {iteration}",
+                animate=True,
+            )
+        print(f"[Generator] Refinement Stage {iteration}: Generating plan fixes and patching plan.")
+        plan, keyframes = refine(
+            plan,
+            keyframes,
+            feedback,
+            object_name=active_object_name,
+            object_json=object_json,
+            prompt=prompt,
+        )
+        previous_score = score
+
+    return plan, keyframes, feedback
+
+
+def _request_refinement_iteration_execution(
+    request_queue,
+    result_queue,
+    iteration,
+    keyframes,
+):
+    result_queue.put(
+        {
+            "type": "refinement_execute",
+            "iteration": iteration,
+            "keyframes": keyframes,
+        }
+    )
+
+    while True:
+        response = request_queue.get()
+        if response is None:
+            raise RuntimeError("Refinement worker received an empty main-thread response.")
+
+        response_type = response.get("type")
+        if response_type == "shutdown":
+            print("[Generator] Worker received shutdown signal.")
+            raise RuntimeError("Refinement worker was shut down before completion.")
+
+        if response.get("iteration") != iteration:
+            continue
+
+        if response_type == "refinement_iteration_error":
+            raise RuntimeError(response.get("message") or "Refinement iteration failed in Blender.")
+
+        if response_type == "refinement_iteration_data":
+            return response["skeleton_frames"]
 
 
 class GENERATOR_OT_generate(bpy.types.Operator):
@@ -531,15 +927,17 @@ class GENERATOR_OT_generate(bpy.types.Operator):
         request_queue = queue.Queue()
         result_queue = queue.Queue()
         worker_thread = threading.Thread(
-            target=_generation_worker,
+            target=_refinement_worker,
             args=(request_queue, result_queue, object_name, object_json, user_prompt),
-            name="GradGeneratorWorker",
+            name="GradRefinementWorker",
             daemon=True,
         )
 
         job_state = {
             "scene": scene,
+            "mode": "refinement",
             "object_name": object_name,
+            "user_prompt": user_prompt,
             "request_queue": request_queue,
             "result_queue": result_queue,
             "thread": worker_thread,
@@ -547,13 +945,19 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             "executor": BlenderExecutor(),
             "steps": [],
             "current_step": 0,
-            "total_steps": 0,
+            "total_steps": 4,
             "current_instruction": "",
             "status": "Generating plan",
             "status_base": "",
             "status_dots": 0,
             "waiting_for_llm": False,
             "previous_animation": None,
+            "plan_history": [],
+            "all_outputs": [],
+            "final_animation": "",
+            "final_plan": "",
+            "final_keyframes": "",
+            "final_feedback": None,
             "plan_text": "",
             "step_logs": [],
             "plan_ready": False,

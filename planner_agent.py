@@ -6,6 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptT
 from langchain_core.output_parsers import StrOutputParser
 from langchain.chat_models import init_chat_model
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
@@ -289,13 +290,18 @@ def get_llm(model: str):
     #                 # "X-OpenRouter-Title": getenv("YOUR_SITE_NAME"),
     #             },
     #         )
-      return ChatOpenAI(
-                  model="gpt-5.4-mini",
-                  base_url="http://localhost:4000/v1",
-                  api_key="nothing",
-                  temperature=0.5,
-                  use_responses_api=True,
-              )
+    #   return ChatOpenAI(
+    #               model="gpt-5.4-mini",
+    #               base_url="http://localhost:4000/v1",
+    #               api_key="nothing",
+    #               temperature=0.65,
+    #               use_responses_api=True,
+    #           )
+    return ChatGoogleGenerativeAI(
+        model="gemma-4-31b-it",
+        google_api_key=getenv("GOOGLE_API_KEY"),
+        temperature=0
+    )
 example_prompt = ChatPromptTemplate.from_messages([
     ("human", "Object: **{object}**. Object JSON: {object_json}. Request: {user_prompt}."),
     ("ai", "{plan}"),

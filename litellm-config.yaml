@@ -8,12 +8,12 @@ model_list:
   - model_name: gpt-5-mini
     litellm_params:
       model: github_copilot/gpt-5-mini
-  # - model_name: gpt-5.4-mini
-  #   litellm_params:
-  #     model: github_copilot/gpt-5.4-mini
-  #     extra_headers: {"copilot-integration-id": "vscode-chat", "editor-plugin-version": "copilot-chat/0.38.2", "user-agent": "GitHubCopilotChat/0.38.2", "openai-intent": "conversation-agent", "x-github-api-version": "2025-10-01", "x-interaction-type": "conversation-agent"}
-  #     model_info:
-  #       mode: responses
+  - model_name: gpt-5.4-mini
+    litellm_params:
+      model: github_copilot/gpt-5.4-mini
+      extra_headers: {"copilot-integration-id": "vscode-chat", "editor-plugin-version": "copilot-chat/0.38.2", "user-agent": "GitHubCopilotChat/0.38.2", "openai-intent": "conversation-agent", "x-github-api-version": "2025-10-01", "x-interaction-type": "conversation-agent"}
+      model_info:
+        mode: responses
   # - model_name: gpt-5.2
   #   litellm_params:
   #     model: github_copilot/gpt-5.2
