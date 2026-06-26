@@ -11,6 +11,8 @@ from langchain_openai import ChatOpenAI
 
 load_dotenv()
 
+PLANNER_MODEL = "gemma-4-31b-it"
+
 # Updated Planner System Prompt to match the required step-by-step, joint-specific axis output
 PLANNER_SYSTEM_PROMPT = """You are an animation planner. Given a user's request, the object JSON hierarchy, and local axis basis, you will produce a clear, sequential plan detailing how to move the necessary joints to perform the given motion.
 
@@ -239,35 +241,7 @@ Root axis +Z: (0.0, 0.0, 1.0); axis +X: (1.0, 0.0, 0.0); axis +Y: (0.0, -1.0, 0.
     }
 ]
 
-FREE_MODELS = [
-"openrouter/free",
-"stepfun/step-3.5-flash:free",
-"arcee-ai/trinity-large-preview:free",
-"liquid/lfm-2.5-1.2b-thinking:free",
-"liquid/lfm-2.5-1.2b-instruct:free",
-"nvidia/nemotron-3-nano-30b-a3b:free",
-"arcee-ai/trinity-mini:free",
-"nvidia/nemotron-nano-12b-v2-vl:free",
-"qwen/qwen3-vl-30b-a3b-thinking",
-"qwen/qwen3-vl-235b-a22b-thinking",
-"qwen/qwen3-next-80b-a3b-instruct:free",
-"nvidia/nemotron-nano-9b-v2:free",
-"openai/gpt-oss-120b:free",
-"openai/gpt-oss-20b:free",
-"z-ai/glm-4.5-air:free",
-"qwen/qwen3-coder:free",
-"cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-"google/gemma-3n-e2b-it:free",
-"google/gemma-3n-e4b-it:free",
-"qwen/qwen3-4b:free",
-"mistralai/mistral-small-3.1-24b-instruct:free",
-"google/gemma-3-4b-it:free",
-"google/gemma-3-12b-it:free",
-"google/gemma-3-27b-it:free",
-"meta-llama/llama-3.3-70b-instruct:free",
-"meta-llama/llama-3.2-3b-instruct:free",
-"nousresearch/hermes-3-llama-3.1-405b:free",
-]
+FREE_MODELS = [PLANNER_MODEL]
 
 def get_llm(model: str):
     # return init_chat_model(
@@ -289,12 +263,16 @@ def get_llm(model: str):
     #                 # "X-OpenRouter-Title": getenv("YOUR_SITE_NAME"),
     #             },
     #         )
-      return ChatOpenAI(
-                  model="gpt-5.4-mini",
-                  base_url="http://localhost:4000/v1",
-                  api_key="nothing",
-                  temperature=0.5,
-                  use_responses_api=True,
+      from langchain_google_genai import ChatGoogleGenerativeAI
+
+      api_key = getenv("GOOGLE_API_KEY")
+      if not api_key:
+          raise RuntimeError("Missing GOOGLE_API_KEY environment variable.")
+
+      return ChatGoogleGenerativeAI(
+                  model=model or PLANNER_MODEL,
+                  google_api_key=api_key,
+                  temperature=0,
               )
 example_prompt = ChatPromptTemplate.from_messages([
     ("human", "Object: **{object}**. Object JSON: {object_json}. Request: {user_prompt}."),
@@ -313,7 +291,9 @@ prompt_template = ChatPromptTemplate.from_messages([
     ("human", (
         "The object you will make the animation plan for is **{object}**. "
         "Object JSON: {object_json}. "
-        "The user's request is: {user_prompt}."
+        "The user's final refined request is: {user_prompt}. "
+        "Clarification history, provided only as supporting context because the final refined request is authoritative: "
+        "{clarification_history}."
     )),
 ])
 
@@ -541,12 +521,13 @@ class PlannerAgent:
         raise ValueError(f"No example object_json found for '{object_name}'.")
 
 
-def run_llm(object_name, object_json, user_prompt):
+def run_llm(object_name, object_json, user_prompt, clarification_history=None):
     planner = PlannerAgent()
     return planner.invoke_chain({
         "object": object_name,
         "object_json": object_json,
         "user_prompt": user_prompt,
+        "clarification_history": _format_clarification_history(clarification_history),
     })
 
 
@@ -560,6 +541,31 @@ def run_pipeline(object_name, object_json, user_prompt, converter=None):
         raise ValueError(f"Failed to convert generated plan to quaternions: {error}") from error
 
     return plan_text, quaternion_output
+
+
+def _format_clarification_history(clarification_history) -> str:
+    if not clarification_history:
+        return "None."
+
+    if isinstance(clarification_history, str):
+        text = clarification_history.strip()
+        return text or "None."
+
+    lines = []
+    for index, item in enumerate(clarification_history, start=1):
+        if isinstance(item, dict):
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("answer") or "").strip()
+        else:
+            question = str(item).strip()
+            answer = ""
+
+        if question and answer:
+            lines.append(f"{index}. Q: {question} A: {answer}")
+        elif question:
+            lines.append(f"{index}. {question}")
+
+    return "\n".join(lines) if lines else "None."
 
 
 if __name__ == "__main__":
