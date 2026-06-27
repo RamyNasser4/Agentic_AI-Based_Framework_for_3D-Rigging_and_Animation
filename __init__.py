@@ -365,7 +365,14 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
         _queue_worker_error(result_queue, f"Generation failed: {error}")
 
 
-def _refinement_worker(request_queue, result_queue, object_name, object_json, prompt):
+def _refinement_worker(
+    request_queue,
+    result_queue,
+    object_name,
+    object_json,
+    prompt,
+    preview_armature_name=None,
+):
     try:
         print(f"[Generator] Worker started for object `{object_name}`.")
         print(f"[Generator] Refinement worker started for object `{object_name}`.")
@@ -375,6 +382,7 @@ def _refinement_worker(request_queue, result_queue, object_name, object_json, pr
             object_json=object_json,
             request_queue=request_queue,
             result_queue=result_queue,
+            preview_armature_name=preview_armature_name,
             debug=True,
         )
         result_queue.put(
@@ -442,6 +450,7 @@ def _execute_refinement_iteration(scene, job_state, item):
 
     iteration = item["iteration"]
     keyframes = item["keyframes"]
+    preview_armature_name = job_state.get("preview_armature_name") or job_state["object_name"]
 
     job_state["current_step"] = iteration
     job_state["current_instruction"] = f"Iteration {iteration}"
@@ -451,19 +460,29 @@ def _execute_refinement_iteration(scene, job_state, item):
 
     try:
         print(f"[Generator] Refinement Stage {iteration}: Executing keyframes in Blender.")
+        print(f"[Preview] Executing refinement on preview armature `{preview_armature_name}`.")
         job_state["executor"].execute_from_text(
             keyframes,
-            armature_name=job_state["object_name"],
+            armature_name=preview_armature_name,
             clear_existing_action=True,
         )
+        preview_armature = bpy.data.objects.get(preview_armature_name)
+        preview_action = getattr(getattr(preview_armature, "animation_data", None), "action", None)
+        if preview_action is not None:
+            job_state["preview_action_name"] = preview_action.name
+            scene.preview_action_name = preview_action.name
+            print(f"[Preview] Preview action updated to `{preview_action.name}`.")
         print(f"[Generator] Refinement Blender execution completed for iteration {iteration}.")
         job_state["final_animation"] = keyframes
         job_state["previous_animation"] = keyframes
 
         _set_status(job_state, "Rendering skeleton frames")
         _refresh_scene_output(scene, job_state)
-        print(f"[Generator] Refinement Stage {iteration}: Extracting skeleton frames in Blender.")
-        skeleton_frames = extract_skeleton_frames(job_state["object_name"])
+        print(
+            f"[Generator] Refinement Stage {iteration}: "
+            f"Extracting skeleton frames from preview armature `{preview_armature_name}`."
+        )
+        skeleton_frames = extract_skeleton_frames(preview_armature_name)
         print(f"[Generator] Skeleton extraction completed for iteration {iteration}.")
 
         job_state["request_queue"].put(
@@ -681,6 +700,7 @@ def run_with_refinement(
     object_json=None,
     request_queue=None,
     result_queue=None,
+    preview_armature_name=None,
 ):
     from .SceneParser import SceneParser
     from .critic_agent import evaluate_motion
@@ -695,6 +715,7 @@ def run_with_refinement(
         active_object_name = _resolve_target_object_name(bpy.context, active_scene)
     if not active_object_name:
         raise ValueError("run_with_refinement requires an armature object name.")
+    execution_armature_name = preview_armature_name or active_object_name
 
     if object_json is None:
         if queue_mode:
@@ -754,14 +775,18 @@ def run_with_refinement(
             )
         else:
             print(f"[Generator] Refinement Stage {iteration}: Executing keyframes in Blender.")
+            print(f"[Preview] Executing refinement on armature `{execution_armature_name}`.")
             executor.execute_from_text(
                 keyframes,
-                armature_name=active_object_name,
+                armature_name=execution_armature_name,
                 clear_existing_action=True,
             )
             print(f"[Generator] Refinement Blender execution completed for iteration {iteration}.")
-            print(f"[Generator] Refinement Stage {iteration}: Extracting skeleton frames in Blender.")
-            skeleton_frames = extract_skeleton_frames(active_object_name)
+            print(
+                f"[Generator] Refinement Stage {iteration}: "
+                f"Extracting skeleton frames from `{execution_armature_name}`."
+            )
+            skeleton_frames = extract_skeleton_frames(execution_armature_name)
 
         if result_queue is not None:
             _queue_refinement_status(
@@ -878,11 +903,22 @@ def _request_refinement_iteration_execution(
             return response["skeleton_frames"]
 
 
+def _scene_has_preview(scene):
+    try:
+        from . import preview_manager
+
+        return preview_manager.preview_exists(scene)
+    except Exception as error:
+        print(f"[Preview] Preview state check failed: {error}")
+        return False
+
+
 class GENERATOR_OT_generate(bpy.types.Operator):
-    bl_label = "Generate"
+    bl_label = "Generate Preview"
     bl_idname = "generator.generate"
 
     def execute(self, context):
+        from . import preview_manager
         from .SceneParser import SceneParser
 
         scene = context.scene
@@ -910,6 +946,14 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             self.report({"WARNING"}, "Select a valid object before generating")
             return {"CANCELLED"}
 
+        original_armature = bpy.data.objects.get(object_name)
+        if original_armature is None:
+            self.report({"ERROR"}, f"Armature `{object_name}` was not found")
+            return {"CANCELLED"}
+        if getattr(original_armature, "type", None) != "ARMATURE":
+            self.report({"ERROR"}, f"Object `{object_name}` is not an armature")
+            return {"CANCELLED"}
+
         print(f"[Generator] Starting pipeline for object `{object_name}`.")
         print(f"[Generator] Prompt: {user_prompt}")
 
@@ -924,11 +968,35 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             self.report({"ERROR"}, f"Scene parse failed: {error}")
             return {"CANCELLED"}
 
+        try:
+            print("[Preview] Preparing non-destructive preview resources.")
+            preview_state = preview_manager.prepare_preview(
+                context,
+                original_armature,
+                owner_scene=scene,
+            )
+            print(
+                "[Preview] Generation target is preview armature "
+                f"`{preview_state['preview_armature_name']}`."
+            )
+        except Exception as error:
+            print(f"[Preview] Preview setup failed: {error}")
+            print(traceback.format_exc())
+            self.report({"ERROR"}, f"Preview setup failed: {error}")
+            return {"CANCELLED"}
+
         request_queue = queue.Queue()
         result_queue = queue.Queue()
         worker_thread = threading.Thread(
             target=_refinement_worker,
-            args=(request_queue, result_queue, object_name, object_json, user_prompt),
+            args=(
+                request_queue,
+                result_queue,
+                object_name,
+                object_json,
+                user_prompt,
+                preview_state["preview_armature_name"],
+            ),
             name="GradRefinementWorker",
             daemon=True,
         )
@@ -937,6 +1005,10 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             "scene": scene,
             "mode": "refinement",
             "object_name": object_name,
+            "preview_scene_name": preview_state["preview_scene_name"],
+            "preview_armature_name": preview_state["preview_armature_name"],
+            "preview_action_name": preview_state["preview_action_name"],
+            "preview_ready": True,
             "user_prompt": user_prompt,
             "request_queue": request_queue,
             "result_queue": result_queue,
@@ -975,6 +1047,63 @@ class GENERATOR_OT_generate(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class GENERATOR_OT_accept_preview(bpy.types.Operator):
+    bl_label = "Accept Preview"
+    bl_idname = "generator.accept_preview"
+
+    def execute(self, context):
+        from . import preview_manager
+
+        scene = context.scene
+        if scene.gen_loading:
+            self.report({"WARNING"}, "Wait for generation to finish before accepting the preview")
+            return {"CANCELLED"}
+
+        if not _scene_has_preview(scene):
+            self.report({"WARNING"}, "No preview is available to accept")
+            return {"CANCELLED"}
+
+        try:
+            preview_manager.accept_preview(context, owner_scene=scene)
+        except Exception as error:
+            print(f"[Preview] Accept preview failed: {error}")
+            print(traceback.format_exc())
+            self.report({"ERROR"}, f"Accept preview failed: {error}")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "Preview accepted")
+        return {"FINISHED"}
+
+
+class GENERATOR_OT_cancel_preview(bpy.types.Operator):
+    bl_label = "Cancel Preview"
+    bl_idname = "generator.cancel_preview"
+
+    def execute(self, context):
+        from . import preview_manager
+
+        scene = context.scene
+        existing_job = _get_generation_job(scene)
+        if existing_job is not None:
+            print("[Preview] Cancel requested while generation job is active.")
+            _finalize_generation(scene, existing_job)
+
+        if not _scene_has_preview(scene):
+            self.report({"WARNING"}, "No preview is available to cancel")
+            return {"CANCELLED"}
+
+        try:
+            preview_manager.cancel_preview(context, owner_scene=scene)
+        except Exception as error:
+            print(f"[Preview] Cancel preview failed: {error}")
+            print(traceback.format_exc())
+            self.report({"ERROR"}, f"Cancel preview failed: {error}")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "Preview canceled")
+        return {"FINISHED"}
+
+
 class GENERATOR_PT_panel(bpy.types.Panel):
     bl_label = "Generator"
     bl_idname = "GENERATOR_PT_panel"
@@ -990,7 +1119,16 @@ class GENERATOR_PT_panel(bpy.types.Panel):
         box.label(text="Prompt", icon="TEXT")
         box.prop(scene, "gen_prompt", text="")
         box.prop(scene, "gen_mode")
-        box.operator("generator.generate", icon="PLAY")
+        box.operator("generator.generate", text="Generate Preview", icon="PLAY")
+
+        preview_available = _scene_has_preview(scene)
+        accept_row = box.row()
+        accept_row.enabled = preview_available and not scene.gen_loading
+        accept_row.operator("generator.accept_preview", text="Accept Preview", icon="CHECKMARK")
+
+        cancel_row = box.row()
+        cancel_row.enabled = preview_available
+        cancel_row.operator("generator.cancel_preview", text="Cancel Preview", icon="CANCEL")
 
         result_box = layout.box()
         result_box.label(text="Result", icon="CONSOLE")
@@ -1017,6 +1155,8 @@ class GENERATOR_PT_panel(bpy.types.Panel):
 
 classes = [
     GENERATOR_OT_generate,
+    GENERATOR_OT_accept_preview,
+    GENERATOR_OT_cancel_preview,
     GENERATOR_PT_panel,
 ]
 
@@ -1049,8 +1189,43 @@ def register():
         default=False,
     )
 
+    bpy.types.Scene.preview_scene_name = bpy.props.StringProperty(
+        name="Preview Scene",
+        description="Name of the active AI preview scene",
+        default="",
+    )
+
+    bpy.types.Scene.preview_armature_name = bpy.props.StringProperty(
+        name="Preview Armature",
+        description="Name of the active AI preview armature",
+        default="",
+    )
+
+    bpy.types.Scene.preview_action_name = bpy.props.StringProperty(
+        name="Preview Action",
+        description="Name of the active AI preview action",
+        default="",
+    )
+
+    bpy.types.Scene.preview_original_armature_name = bpy.props.StringProperty(
+        name="Original Armature",
+        description="Name of the original armature for the active preview",
+        default="",
+    )
+
+    bpy.types.Scene.preview_active = bpy.props.BoolProperty(
+        name="Preview Active",
+        description="True while a generated preview is available",
+        default=False,
+    )
+
 
 def unregister():
+    del bpy.types.Scene.preview_active
+    del bpy.types.Scene.preview_original_armature_name
+    del bpy.types.Scene.preview_action_name
+    del bpy.types.Scene.preview_armature_name
+    del bpy.types.Scene.preview_scene_name
     del bpy.types.Scene.gen_prompt
     del bpy.types.Scene.gen_mode
     del bpy.types.Scene.gen_output

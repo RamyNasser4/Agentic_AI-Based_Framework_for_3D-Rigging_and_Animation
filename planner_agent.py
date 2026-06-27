@@ -297,11 +297,17 @@ def get_llm(model: str):
     #               temperature=0.65,
     #               use_responses_api=True,
     #           )
-    return ChatGoogleGenerativeAI(
-        model="gemma-4-31b-it",
-        google_api_key=getenv("GOOGLE_API_KEY"),
-        temperature=0
+    return ChatOpenAI(
+        model="zai-org/GLM-5.2:novita",
+        base_url="https://router.huggingface.co/v1",
+        api_key=getenv("HF_TOKEN"),
+        temperature=0,
     )
+    # return ChatGoogleGenerativeAI(
+    #     model="gemma-4-31b-it",
+    #     google_api_key=getenv("GOOGLE_API_KEY"),
+    #     temperature=0
+    # )
 example_prompt = ChatPromptTemplate.from_messages([
     ("human", "Object: **{object}**. Object JSON: {object_json}. Request: {user_prompt}."),
     ("ai", "{plan}"),
