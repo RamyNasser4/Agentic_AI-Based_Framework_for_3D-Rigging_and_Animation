@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from typing import Any, Dict, List, Sequence
 
 from langchain_core.output_parsers import StrOutputParser
@@ -11,15 +12,44 @@ from .planner_agent import PLANNER_MODEL, get_llm
 
 
 MAX_REFINEMENT_QUESTIONS = 10
+REFINEMENT_DECISION_ATTEMPTS = 3
+
+RIG_CAPABILITY_ALIASES = {
+    "arm": ("arm", "shoulder", "elbow", "forearm", "wrist", "hand", "palm"),
+    "ear": ("ear",),
+    "eye": ("eye",),
+    "finger": ("finger", "thumb", "index", "middle", "ring", "pinky"),
+    "fin": ("fin", "flipper"),
+    "flipper": ("flipper", "fin"),
+    "foot": ("foot", "toe", "ankle"),
+    "hand": ("hand", "palm", "wrist"),
+    "head": ("head", "neck"),
+    "leg": ("leg", "hip", "knee", "ankle", "foot", "thigh", "shin", "toe"),
+    "tail": ("tail",),
+    "wing": ("wing",),
+}
 
 REFINEMENT_SYSTEM_PROMPT = """You are a Prompt Refinement Agent for a Blender animation generator.
 
-Your job is to reduce ambiguity in user animation requests before the animation planner runs.
+Your job is to reduce ambiguity in the current or evolving user animation request before the animation planner runs.
 
 You receive:
-- the current user prompt
+- the current prompt, which may already include resolved clarifications
+- object name
+- object JSON rig hierarchy
 - clarification history
 - question count
+
+Rig-awareness rules:
+- You must inspect the object JSON before deciding whether to ask a question.
+- Use the object JSON only to understand what body parts, joints, appendages, and structural capabilities the object has.
+- Base questions on both the current prompt and the supplied rig hierarchy.
+- Ask about a body part or capability only if the object JSON includes a matching joint or hierarchy branch.
+- If the rig contains wings, wing-related clarification questions may be appropriate.
+- If the rig contains a tail, tail-related clarification questions may be appropriate.
+- If the rig does not contain a body part, do not ask about that body part.
+- Do not perform animation planning, joint rotation planning, step planning, keyframe planning, or motion generation.
+- Do not mention exact rotation axes, angle values, keyframes, or planner instructions.
 
 Ask another question only when the answer would produce a different animation plan.
 
@@ -59,6 +89,8 @@ refinement_prompt = ChatPromptTemplate.from_messages(
             "human",
             (
                 "Current prompt:\n{current_prompt}\n\n"
+                "Object name:\n{object_name}\n\n"
+                "Object JSON rig hierarchy:\n{object_json}\n\n"
                 "Clarification history:\n{clarification_history}\n\n"
                 "Question count: {question_count}\n"
                 "Maximum questions: {max_questions}\n\n"
@@ -97,16 +129,23 @@ final_prompt_template = ChatPromptTemplate.from_messages(
 )
 
 
+@lru_cache(maxsize=4)
+def _get_refinement_llm(model: str):
+    return get_llm(model)
+
+
 class PromptRefinementAgent:
     def __init__(self, model: str | None = None):
         self.model = model or PLANNER_MODEL
-        llm = get_llm(self.model)
+        llm = _get_refinement_llm(self.model)
         self.chain = refinement_prompt | llm | StrOutputParser()
         self.final_prompt_chain = final_prompt_template | llm | StrOutputParser()
 
     def decide(
         self,
         current_prompt: str,
+        object_name: str = "",
+        object_json: str = "",
         clarification_history: Sequence[Dict[str, str]] | str | None = None,
         question_count: int = 0,
     ) -> Dict[str, str]:
@@ -114,31 +153,31 @@ class PromptRefinementAgent:
             return {"status": "STOP"}
 
         format_feedback = ""
-        last_error: Exception | None = None
+        object_json_text = str(object_json or "").strip()
 
-        for _ in range(3):
+        for _ in range(REFINEMENT_DECISION_ATTEMPTS):
+            response_text = self.chain.invoke(
+                {
+                    "current_prompt": str(current_prompt or "").strip(),
+                    "object_name": str(object_name or "").strip() or "Unknown object",
+                    "object_json": object_json_text or "No object JSON supplied.",
+                    "clarification_history": format_clarification_history(
+                        clarification_history
+                    ),
+                    "question_count": int(question_count),
+                    "max_questions": MAX_REFINEMENT_QUESTIONS,
+                    "format_feedback": format_feedback,
+                }
+            )
             try:
-                response_text = self.chain.invoke(
-                    {
-                        "current_prompt": str(current_prompt or "").strip(),
-                        "clarification_history": format_clarification_history(
-                            clarification_history
-                        ),
-                        "question_count": int(question_count),
-                        "max_questions": MAX_REFINEMENT_QUESTIONS,
-                        "format_feedback": format_feedback,
-                    }
+                return _validate_decision(
+                    _parse_response_json(response_text),
+                    object_json=object_json_text,
                 )
-                return _validate_decision(_parse_response_json(response_text))
             except Exception as error:
-                last_error = error
-                format_feedback = (
-                    "Previous response was invalid. Return only valid JSON with "
-                    '{"status": "QUESTION", "question": "..."} or {"status": "STOP"}. '
-                    "The question, if present, must be a Yes/No/Skip animation-ambiguity question.\n\n"
-                )
+                format_feedback = _build_retry_feedback(error)
 
-        raise ValueError(f"Prompt refinement failed to return a valid decision: {last_error}") from last_error
+        return {"status": "STOP"}
 
     def synthesize_final_prompt(
         self,
@@ -258,7 +297,22 @@ def _extract_response_text(content: Any) -> str:
     return str(content)
 
 
-def _validate_decision(payload: Dict[str, Any]) -> Dict[str, str]:
+def _build_retry_feedback(error: Exception) -> str:
+    reason = str(error).strip() or "The previous clarification question was invalid."
+    return (
+        "Previous response was rejected by the refinement validator and will not be shown "
+        "to the user.\n"
+        f"Rejection reason: {reason}\n"
+        "Discard that question. Generate a different high-level Yes/No/Skip clarification "
+        "only if another remaining ambiguity would produce a substantially different "
+        "animation plan. Do not ask about joint rotations, exact angles, axes, keyframes, "
+        "or other planner-only details. Do not ask about body parts that are absent from "
+        "the object JSON. If no valid high-level clarification remains, return exactly "
+        '{"status": "STOP"}.\n\n'
+    )
+
+
+def _validate_decision(payload: Dict[str, Any], object_json: str = "") -> Dict[str, str]:
     status = str(payload.get("status") or "").strip().upper()
     if status == "STOP":
         return {"status": "STOP"}
@@ -276,6 +330,15 @@ def _validate_decision(payload: Dict[str, Any]) -> Dict[str, str]:
     if _contains_forbidden_question_topic(question):
         raise ValueError(f"Question uses a forbidden topic: {question}")
 
+    if _contains_planning_detail(question):
+        raise ValueError(f"Question includes planner-only detail: {question}")
+
+    missing_capability = _missing_rig_capability(question, object_json)
+    if missing_capability:
+        raise ValueError(
+            f"Question asks about '{missing_capability}', which is not present in the object JSON."
+        )
+
     if _looks_open_ended(question):
         raise ValueError(f"Question is not a Yes/No/Skip question: {question}")
 
@@ -292,6 +355,35 @@ def _contains_forbidden_question_topic(question: str) -> bool:
             re.IGNORECASE,
         )
     )
+
+
+def _contains_planning_detail(question: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(keyframe|keyframes|rotate|rotation|axis|axes|degrees?|units?)\b|[+-][XYZ]\b",
+            question,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _missing_rig_capability(question: str, object_json: str) -> str:
+    if not object_json:
+        return ""
+
+    question_text = question.lower()
+    rig_text = object_json.lower()
+
+    for capability, aliases in RIG_CAPABILITY_ALIASES.items():
+        if not re.search(rf"\b{re.escape(capability)}s?\b", question_text):
+            continue
+        if not any(
+            re.search(rf"(?<![a-z]){re.escape(alias)}[.\w-]*\b", rig_text)
+            for alias in aliases
+        ):
+            return capability
+
+    return ""
 
 
 def _looks_open_ended(question: str) -> bool:

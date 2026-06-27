@@ -320,6 +320,8 @@ def _reset_refinement_state(scene, status="Not refined"):
     scene.gen_refinement_status = status
     scene.gen_refinement_loading = False
     scene.gen_refinement_prompt_snapshot = ""
+    scene.gen_refinement_object_snapshot = ""
+    scene.gen_refinement_object_json_snapshot = ""
     _set_refinement_history(scene, [])
 
 
@@ -335,7 +337,7 @@ def _finish_refinement(scene, history, final_prompt=None):
     _tag_redraw()
 
 
-def _refinement_worker(result_queue, prompt_text, history):
+def _refinement_worker(result_queue, prompt_text, object_name, object_json, history):
     try:
         from .prompt_refinement_agent import PromptRefinementAgent
 
@@ -346,8 +348,11 @@ def _refinement_worker(result_queue, prompt_text, history):
             return
 
         agent = PromptRefinementAgent()
+        current_prompt = _build_refined_prompt(prompt_text, history)
         decision = agent.decide(
-            current_prompt=prompt_text,
+            current_prompt=current_prompt,
+            object_name=object_name,
+            object_json=object_json,
             clarification_history=history,
             question_count=len(history),
         )
@@ -362,7 +367,43 @@ def _refinement_worker(result_queue, prompt_text, history):
         result_queue.put({"type": "error", "message": str(error)})
 
 
-def _start_refinement_job(scene, reset=False):
+def _resolve_refinement_object_context(context, scene, reset=False):
+    from .SceneParser import SceneParser
+
+    current_object_name = _resolve_target_object_name(context, scene)
+    snapshot_object_name = str(getattr(scene, "gen_refinement_object_snapshot", "") or "").strip()
+    snapshot_object_json = str(getattr(scene, "gen_refinement_object_json_snapshot", "") or "").strip()
+
+    if reset:
+        if not current_object_name:
+            raise ValueError("Select an object before refining.")
+        parser = SceneParser(precision=1)
+        object_json = parser.generate_object_json([current_object_name])
+        scene.gen_refinement_object_snapshot = current_object_name
+        scene.gen_refinement_object_json_snapshot = object_json
+        return current_object_name, object_json
+
+    if not snapshot_object_name:
+        if not current_object_name:
+            raise ValueError("Select an object before refining.")
+        parser = SceneParser(precision=1)
+        object_json = parser.generate_object_json([current_object_name])
+        scene.gen_refinement_object_snapshot = current_object_name
+        scene.gen_refinement_object_json_snapshot = object_json
+        return current_object_name, object_json
+
+    if current_object_name and current_object_name != snapshot_object_name:
+        raise ValueError("Object changed; run Prompt Refinement again for the selected object.")
+
+    if not snapshot_object_json:
+        parser = SceneParser(precision=1)
+        snapshot_object_json = parser.generate_object_json([snapshot_object_name])
+        scene.gen_refinement_object_json_snapshot = snapshot_object_json
+
+    return snapshot_object_name, snapshot_object_json
+
+
+def _start_refinement_job(scene, context, reset=False):
     prompt_text = str(scene.gen_prompt or "").strip()
     if not prompt_text or prompt_text == "Write your prompt here...":
         raise ValueError("Please enter a real prompt before refining.")
@@ -376,13 +417,16 @@ def _start_refinement_job(scene, reset=False):
         scene.gen_current_question = ""
         scene.gen_refined_prompt = ""
         scene.gen_refinement_prompt_snapshot = prompt_text
+        scene.gen_refinement_object_snapshot = ""
+        scene.gen_refinement_object_json_snapshot = ""
 
+    object_name, object_json = _resolve_refinement_object_context(context, scene, reset=reset)
     history = _get_refinement_history(scene)
 
     result_queue = queue.Queue()
     worker_thread = threading.Thread(
         target=_refinement_worker,
-        args=(result_queue, prompt_text, history),
+        args=(result_queue, prompt_text, object_name, object_json, history),
         name="PromptRefinementWorker",
         daemon=True,
     )
@@ -391,6 +435,7 @@ def _start_refinement_job(scene, reset=False):
         "thread": worker_thread,
         "result_queue": result_queue,
         "prompt_snapshot": prompt_text,
+        "object_snapshot": object_name,
         "history": history,
         "status_base": "Refining prompt",
         "status_dots": 0,
@@ -744,7 +789,7 @@ class GENERATOR_OT_refine_prompt(bpy.types.Operator):
     def execute(self, context):
         scene = context.scene
         try:
-            _start_refinement_job(scene, reset=True)
+            _start_refinement_job(scene, context, reset=True)
         except Exception as error:
             scene.gen_refinement_status = f"Refinement failed: {error}"
             scene.gen_refinement_loading = False
@@ -785,6 +830,18 @@ class GENERATOR_OT_answer_refinement(bpy.types.Operator):
             self.report({"WARNING"}, "Prompt changed; run Refine Prompt again")
             return {"CANCELLED"}
 
+        current_object_name = _resolve_target_object_name(context, scene)
+        snapshot_object_name = str(scene.gen_refinement_object_snapshot or "").strip()
+        if snapshot_object_name and current_object_name and current_object_name != snapshot_object_name:
+            scene.gen_refinement_status = "Object changed; refine again"
+            scene.gen_refinement_loading = False
+            scene.gen_current_question = ""
+            scene.gen_refined_prompt = ""
+            _set_refinement_history(scene, [])
+            _tag_redraw()
+            self.report({"WARNING"}, "Object changed; run Refine Prompt again")
+            return {"CANCELLED"}
+
         answer = str(self.answer or "Skip").strip().title()
         if answer not in {"Yes", "No", "Skip"}:
             self.report({"WARNING"}, "Answer must be Yes, No, or Skip")
@@ -796,7 +853,7 @@ class GENERATOR_OT_answer_refinement(bpy.types.Operator):
         scene.gen_current_question = ""
 
         try:
-            _start_refinement_job(scene, reset=False)
+            _start_refinement_job(scene, context, reset=False)
         except Exception as error:
             scene.gen_refinement_status = f"Refinement failed: {error}"
             scene.gen_refinement_loading = False
@@ -850,6 +907,11 @@ class GENERATOR_OT_generate(bpy.types.Operator):
         object_name = _resolve_target_object_name(context, scene)
         if not object_name:
             self.report({"WARNING"}, "Select a valid object before generating")
+            return {"CANCELLED"}
+
+        refinement_object_name = str(scene.gen_refinement_object_snapshot or "").strip()
+        if not refinement_object_name or refinement_object_name != object_name:
+            self.report({"WARNING"}, "Run Prompt Refinement for the selected object before generating")
             return {"CANCELLED"}
 
         print(f"[Generator] Starting pipeline for object `{object_name}`.")
@@ -1069,6 +1131,18 @@ def register():
         default="",
     )
 
+    bpy.types.Scene.gen_refinement_object_snapshot = bpy.props.StringProperty(
+        name="Refinement Object Snapshot",
+        description="Object name used for the current prompt refinement",
+        default="",
+    )
+
+    bpy.types.Scene.gen_refinement_object_json_snapshot = bpy.props.StringProperty(
+        name="Refinement Object JSON Snapshot",
+        description="Object JSON rig hierarchy used for the current prompt refinement",
+        default="",
+    )
+
 
 def unregister():
     del bpy.types.Scene.gen_prompt
@@ -1081,6 +1155,8 @@ def unregister():
     del bpy.types.Scene.gen_refinement_loading
     del bpy.types.Scene.gen_refined_prompt
     del bpy.types.Scene.gen_refinement_prompt_snapshot
+    del bpy.types.Scene.gen_refinement_object_snapshot
+    del bpy.types.Scene.gen_refinement_object_json_snapshot
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
