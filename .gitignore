@@ -36,3 +36,5 @@ stats/
 !/*.py
 !/*.ipynb
 racoon&whaleRigs.blend
+*.blend
+*.blend1
