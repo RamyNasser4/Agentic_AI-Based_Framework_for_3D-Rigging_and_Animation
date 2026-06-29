@@ -23,6 +23,15 @@ bl_info = {
 _GENERATION_JOBS = {}
 _GENERATION_JOBS_LOCK = threading.Lock()
 _TIMER_INTERVAL = 0.1
+_AXIS_ENUM_ITEMS = (
+    ("+X", "+X", ""),
+    ("-X", "-X", ""),
+    ("+Y", "+Y", ""),
+    ("-Y", "-Y", ""),
+    ("+Z", "+Z", ""),
+    ("-Z", "-Z", ""),
+)
+_AXIS_VALUES = {item[0] for item in _AXIS_ENUM_ITEMS}
 
 
 def dropdown_items(self, context):
@@ -258,6 +267,70 @@ def _queue_refinement_status(
     }
     payload.update(extra)
     result_queue.put(payload)
+
+
+def _axis_world_component(axis):
+    axis = str(axis or "")
+    return axis[-1:] if axis in _AXIS_VALUES else ""
+
+
+def _validate_direction_axes(forward_axis, up_axis, right_axis):
+    axes = (forward_axis, up_axis, right_axis)
+    if any(axis not in _AXIS_VALUES for axis in axes):
+        return "Choose a valid Forward, Up, and Right axis."
+
+    world_components = [_axis_world_component(axis) for axis in axes]
+    if len(set(world_components)) != 3:
+        return "Forward, Up, and Right must use three different world axes."
+
+    return ""
+
+
+def _direction_settings_from_scene(scene):
+    return {
+        "forward_axis": getattr(scene, "gen_forward_axis", "+Y"),
+        "up_axis": getattr(scene, "gen_up_axis", "+Z"),
+        "right_axis": getattr(scene, "gen_right_axis", "+X"),
+    }
+
+
+def _validate_scene_direction_settings(scene):
+    settings = _direction_settings_from_scene(scene)
+    return _validate_direction_axes(
+        settings["forward_axis"],
+        settings["up_axis"],
+        settings["right_axis"],
+    )
+
+
+def _format_direction_context(direction_settings):
+    forward_axis = direction_settings["forward_axis"]
+    up_axis = direction_settings["up_axis"]
+    right_axis = direction_settings["right_axis"]
+    return (
+        "Semantic direction inference: "
+        f"forward_axis={forward_axis}, "
+        f"up_axis={up_axis}, "
+        f"right_axis={right_axis}, "
+        "is_humanoid=null, "
+        "confidence=1.00, "
+        "needs_user_confirmation=false"
+    )
+
+
+def _append_direction_context(object_json, direction_settings):
+    if direction_settings is None:
+        return object_json
+
+    validation_error = _validate_direction_axes(
+        direction_settings.get("forward_axis"),
+        direction_settings.get("up_axis"),
+        direction_settings.get("right_axis"),
+    )
+    if validation_error:
+        raise ValueError(validation_error)
+
+    return f"{object_json}\n{_format_direction_context(direction_settings)}"
 
 
 def _generation_worker(request_queue, result_queue, object_name, object_json, prompt):
@@ -526,6 +599,10 @@ def _dispatch_next_step(scene, job_state):
 
     try:
         object_json = job_state["parser"].generate_object_json([job_state["object_name"]])
+        object_json = _append_direction_context(
+            object_json,
+            job_state.get("direction_settings"),
+        )
         print(f"[Generator] Parsed fresh scene state for step {step_index}.")
     except Exception as error:
         print(f"[Generator] Scene parse failed for step {step_index}: {error}")
@@ -722,6 +799,8 @@ def run_with_refinement(
             raise ValueError("Queue-based run_with_refinement requires pre-parsed object_json.")
         parser = SceneParser(precision=1)
         object_json = parser.generate_object_json([active_object_name])
+        direction_settings = _direction_settings_from_scene(active_scene)
+        object_json = _append_direction_context(object_json, direction_settings)
 
     executor = None if queue_mode else BlenderExecutor()
 
@@ -863,6 +942,7 @@ def run_with_refinement(
             object_name=active_object_name,
             object_json=object_json,
             prompt=prompt,
+            rendered_images=images,
         )
         previous_score = score
 
@@ -913,6 +993,85 @@ def _scene_has_preview(scene):
         return False
 
 
+def _run_direction_inference_into_scene(context, object_name):
+    from .direction_inference_agent import DirectionInferenceAgent
+
+    scene = context.scene
+    print("[Generator] Inferring semantic direction on main thread.")
+    direction_result = DirectionInferenceAgent(context=context).infer([object_name])
+
+    inferred_settings = {
+        "forward_axis": direction_result.forward_axis,
+        "up_axis": direction_result.up_axis,
+        "right_axis": direction_result.right_axis,
+    }
+    validation_error = _validate_direction_axes(
+        inferred_settings["forward_axis"],
+        inferred_settings["up_axis"],
+        inferred_settings["right_axis"],
+    )
+    if validation_error:
+        raise ValueError(f"Direction inference returned unusable axes: {validation_error}")
+
+    scene.gen_forward_axis = inferred_settings["forward_axis"]
+    scene.gen_up_axis = inferred_settings["up_axis"]
+    scene.gen_right_axis = inferred_settings["right_axis"]
+    scene.gen_direction_inference_ready = True
+    scene.gen_direction_inferred_object_name = object_name
+    scene.gen_direction_error = ""
+
+    print(
+        "[Generator] Direction inference populated UI controls: "
+        f"forward={direction_result.forward_axis}, "
+        f"up={direction_result.up_axis}, "
+        f"right={direction_result.right_axis}, "
+        f"humanoid={direction_result.is_humanoid}, "
+        f"confidence={direction_result.confidence:.2f}."
+    )
+    scene.gen_output = (
+        "Status: Direction inference completed\n"
+        "Review the Direction Settings, adjust them if needed, then generate again.\n"
+        f"Forward Axis: {scene.gen_forward_axis}\n"
+        f"Up Axis: {scene.gen_up_axis}\n"
+        f"Right Axis: {scene.gen_right_axis}\n"
+        f"Confidence: {direction_result.confidence:.2f}"
+    )
+    _tag_redraw()
+    return direction_result
+
+
+class GENERATOR_OT_infer_directions(bpy.types.Operator):
+    bl_label = "Infer Directions"
+    bl_idname = "generator.infer_directions"
+
+    def execute(self, context):
+        scene = context.scene
+
+        if context.active_object is None:
+            self.report({"WARNING"}, "Select an object before inferring directions")
+            return {"CANCELLED"}
+
+        object_name = _resolve_target_object_name(context, scene)
+        if not object_name:
+            self.report({"WARNING"}, "Select a valid object before inferring directions")
+            return {"CANCELLED"}
+
+        try:
+            _run_direction_inference_into_scene(context, object_name)
+        except Exception as error:
+            scene.gen_direction_error = str(error)
+            scene.gen_direction_inference_ready = False
+            scene.gen_output = f"Status: Direction inference failed\n{error}"
+            print(f"[Generator] Direction inference failed: {error}")
+            print(traceback.format_exc())
+            self.report({"WARNING"}, f"Direction inference failed: {error}")
+            _tag_redraw()
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "Direction inference completed")
+        return {"FINISHED"}
+
+
 class GENERATOR_OT_generate(bpy.types.Operator):
     bl_label = "Generate Preview"
     bl_idname = "generator.generate"
@@ -954,6 +1113,39 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             self.report({"ERROR"}, f"Object `{object_name}` is not an armature")
             return {"CANCELLED"}
 
+        needs_direction_inference = (
+            scene.gen_auto_infer_directions
+            and (
+                not scene.gen_direction_inference_ready
+                or scene.gen_direction_inferred_object_name != object_name
+            )
+        )
+        if needs_direction_inference:
+            try:
+                _run_direction_inference_into_scene(context, object_name)
+            except Exception as error:
+                scene.gen_direction_error = str(error)
+                scene.gen_direction_inference_ready = False
+                scene.gen_output = f"Status: Direction inference failed\n{error}"
+                print(f"[Generator] Direction inference failed: {error}")
+                print(traceback.format_exc())
+                self.report({"WARNING"}, f"Direction inference failed: {error}")
+                _tag_redraw()
+                return {"CANCELLED"}
+
+            self.report({"INFO"}, "Direction inference completed; review settings before generating")
+            return {"FINISHED"}
+
+        direction_validation_error = _validate_scene_direction_settings(scene)
+        if direction_validation_error:
+            scene.gen_direction_error = direction_validation_error
+            scene.gen_output = f"Status: Direction settings invalid\n{direction_validation_error}"
+            self.report({"ERROR"}, direction_validation_error)
+            _tag_redraw()
+            return {"CANCELLED"}
+        scene.gen_direction_error = ""
+        direction_settings = _direction_settings_from_scene(scene)
+
         print(f"[Generator] Starting pipeline for object `{object_name}`.")
         print(f"[Generator] Prompt: {user_prompt}")
 
@@ -962,6 +1154,7 @@ class GENERATOR_OT_generate(bpy.types.Operator):
         try:
             print("[Generator] Stage 1: Parsing initial scene state on main thread.")
             object_json = parser.generate_object_json([object_name])
+            object_json = _append_direction_context(object_json, direction_settings)
             print("[Generator] Initial scene parse completed.")
         except Exception as error:
             print(f"[Generator] Initial scene parse failed: {error}")
@@ -1014,6 +1207,7 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             "result_queue": result_queue,
             "thread": worker_thread,
             "parser": parser,
+            "direction_settings": direction_settings,
             "executor": BlenderExecutor(),
             "steps": [],
             "current_step": 0,
@@ -1031,7 +1225,14 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             "final_keyframes": "",
             "final_feedback": None,
             "plan_text": "",
-            "step_logs": [],
+            "step_logs": [
+                (
+                    "Direction settings: "
+                    f"forward={direction_settings['forward_axis']}, "
+                    f"up={direction_settings['up_axis']}, "
+                    f"right={direction_settings['right_axis']}"
+                )
+            ],
             "plan_ready": False,
         }
 
@@ -1119,14 +1320,36 @@ class GENERATOR_PT_panel(bpy.types.Panel):
         box.label(text="Prompt", icon="TEXT")
         box.prop(scene, "gen_prompt", text="")
         box.prop(scene, "gen_mode")
-        box.operator("generator.generate", text="Generate Preview", icon="PLAY")
+
+        direction_box = layout.box()
+        direction_box.label(text="Direction Settings", icon="ORIENTATION_LOCAL")
+        direction_box.prop(scene, "gen_auto_infer_directions")
+        if scene.gen_auto_infer_directions:
+            infer_row = direction_box.row()
+            infer_row.enabled = not scene.gen_loading
+            infer_row.operator("generator.infer_directions", text="Infer Directions", icon="VIEW_CAMERA")
+        direction_box.prop(scene, "gen_forward_axis")
+        direction_box.prop(scene, "gen_up_axis")
+        direction_box.prop(scene, "gen_right_axis")
+
+        direction_error = scene.gen_direction_error or _validate_scene_direction_settings(scene)
+        if direction_error:
+            error_col = direction_box.column()
+            error_col.alert = True
+            for line in textwrap.wrap(direction_error, width=45):
+                error_col.label(text=line, icon="ERROR")
+
+        action_box = layout.box()
+        generate_row = action_box.row()
+        generate_row.enabled = not (direction_error and not scene.gen_auto_infer_directions)
+        generate_row.operator("generator.generate", text="Generate Preview", icon="PLAY")
 
         preview_available = _scene_has_preview(scene)
-        accept_row = box.row()
+        accept_row = action_box.row()
         accept_row.enabled = preview_available and not scene.gen_loading
         accept_row.operator("generator.accept_preview", text="Accept Preview", icon="CHECKMARK")
 
-        cancel_row = box.row()
+        cancel_row = action_box.row()
         cancel_row.enabled = preview_available
         cancel_row.operator("generator.cancel_preview", text="Cancel Preview", icon="CANCEL")
 
@@ -1154,11 +1377,23 @@ class GENERATOR_PT_panel(bpy.types.Panel):
 
 
 classes = [
+    GENERATOR_OT_infer_directions,
     GENERATOR_OT_generate,
     GENERATOR_OT_accept_preview,
     GENERATOR_OT_cancel_preview,
     GENERATOR_PT_panel,
 ]
+
+
+def _on_auto_infer_directions_changed(self, context):
+    self.gen_direction_inference_ready = False
+    self.gen_direction_inferred_object_name = ""
+    if not self.gen_auto_infer_directions:
+        self.gen_direction_error = _validate_scene_direction_settings(self)
+
+
+def _on_direction_axis_changed(self, context):
+    self.gen_direction_error = _validate_scene_direction_settings(self)
 
 
 def register():
@@ -1175,6 +1410,55 @@ def register():
         name="Object",
         description="Select Object",
         items=dropdown_items,
+    )
+
+    bpy.types.Scene.gen_auto_infer_directions = bpy.props.BoolProperty(
+        name="Automatically Infer Directions",
+        description="Use the vision direction helper to populate the direction controls",
+        default=False,
+        update=_on_auto_infer_directions_changed,
+    )
+
+    bpy.types.Scene.gen_forward_axis = bpy.props.EnumProperty(
+        name="Forward Axis",
+        description="Semantic forward axis for the selected object",
+        items=_AXIS_ENUM_ITEMS,
+        default="+Y",
+        update=_on_direction_axis_changed,
+    )
+
+    bpy.types.Scene.gen_up_axis = bpy.props.EnumProperty(
+        name="Up Axis",
+        description="Semantic up axis for the selected object",
+        items=_AXIS_ENUM_ITEMS,
+        default="+Z",
+        update=_on_direction_axis_changed,
+    )
+
+    bpy.types.Scene.gen_right_axis = bpy.props.EnumProperty(
+        name="Right Axis",
+        description="Semantic right axis for the selected object",
+        items=_AXIS_ENUM_ITEMS,
+        default="+X",
+        update=_on_direction_axis_changed,
+    )
+
+    bpy.types.Scene.gen_direction_error = bpy.props.StringProperty(
+        name="Direction Error",
+        description="Direction settings validation or inference error",
+        default="",
+    )
+
+    bpy.types.Scene.gen_direction_inference_ready = bpy.props.BoolProperty(
+        name="Direction Inference Ready",
+        description="True after AI inference has populated the direction controls for review",
+        default=False,
+    )
+
+    bpy.types.Scene.gen_direction_inferred_object_name = bpy.props.StringProperty(
+        name="Direction Inferred Object",
+        description="Object name used for the last AI direction inference",
+        default="",
     )
 
     bpy.types.Scene.gen_output = bpy.props.StringProperty(
@@ -1226,6 +1510,13 @@ def unregister():
     del bpy.types.Scene.preview_action_name
     del bpy.types.Scene.preview_armature_name
     del bpy.types.Scene.preview_scene_name
+    del bpy.types.Scene.gen_direction_inferred_object_name
+    del bpy.types.Scene.gen_direction_inference_ready
+    del bpy.types.Scene.gen_direction_error
+    del bpy.types.Scene.gen_right_axis
+    del bpy.types.Scene.gen_up_axis
+    del bpy.types.Scene.gen_forward_axis
+    del bpy.types.Scene.gen_auto_infer_directions
     del bpy.types.Scene.gen_prompt
     del bpy.types.Scene.gen_mode
     del bpy.types.Scene.gen_output

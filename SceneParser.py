@@ -4,10 +4,8 @@ from typing import Iterable, List, Optional
 
 try:
     import bpy  # type: ignore
-    from mathutils import Vector  # type: ignore
 except ImportError:  # pragma: no cover - only available inside Blender
     bpy = None
-    Vector = None
 
 
 class SceneParser:
@@ -27,16 +25,12 @@ class SceneParser:
         if not objects:
             raise ValueError("No objects were provided to generate_object_json().")
 
-        object_json = ",".join(self._serialize_object(obj) for obj in objects)
-        if not include_root_directions:
-            return object_json
-
-        return f"{object_json}\n{self._format_root_directions(objects[0])}"
+        return ",".join(self._serialize_object(obj) for obj in objects)
 
     def generate_scene_info(self, selected_objects: Optional[Iterable[object]] = None) -> str:
         return self.generate_object_json(
             selected_objects=selected_objects,
-            include_root_directions=True,
+            include_root_directions=False,
         )
 
     def _resolve_objects(self, selected_objects: Optional[Iterable[object]]) -> List[object]:
@@ -116,42 +110,6 @@ class SceneParser:
             self._format_float(value)
             for value in (quaternion.x, quaternion.y, quaternion.z, quaternion.w)
         )
-        return f"({formatted_values})"
-
-    def _get_root_bone(self, obj: object) -> object:
-        pose = getattr(obj, "pose", None)
-        if pose is None or not getattr(pose, "bones", None):
-            raise ValueError(f"Object `{obj.name}` does not have any pose bones.")
-
-        root_bones = [pose_bone for pose_bone in pose.bones if pose_bone.parent is None]
-        if not root_bones:
-            raise ValueError(f"Armature `{obj.name}` does not have a root pose bone.")
-
-        preferred_names = {"root", "master", "pelvis"}
-        for pose_bone in root_bones:
-            if pose_bone.name.lower() in preferred_names:
-                return pose_bone
-
-        return root_bones[0]
-
-    def _format_root_directions(self, obj: object) -> str:
-        if Vector is None:
-            raise RuntimeError("SceneParser must be run inside Blender because mathutils is unavailable.")
-
-        root_bone = self._get_root_bone(obj)
-        orientation = root_bone.matrix.to_3x3()  # world-space including rest pose
-        forward = (orientation @ Vector((0.0, 1.0, 0.0))).normalized()
-        right = (orientation @ Vector((1.0, 0.0, 0.0))).normalized()
-        up = (orientation @ Vector((0.0, 0.0, 1.0))).normalized()
-
-        return (
-            f"Root forward direction: {self._format_direction_tuple(forward)}; "
-            f"right direction: {self._format_direction_tuple(right)}; "
-            f"up direction: {self._format_direction_tuple(up)}"
-        )
-
-    def _format_direction_tuple(self, values) -> str:
-        formatted_values = ", ".join(self._format_float(value) for value in values)
         return f"({formatted_values})"
 
     def _format_float(self, value: float) -> str:

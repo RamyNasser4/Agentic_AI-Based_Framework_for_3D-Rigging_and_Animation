@@ -26,6 +26,7 @@ def refine(
     object_name: str | None = None,
     object_json: str | None = None,
     prompt: str | None = None,
+    rendered_images: Sequence[Any] | None = None,
 ) -> Tuple[str, str]:
     if not object_name or not object_json or not prompt:
         raise ValueError(
@@ -39,6 +40,7 @@ def refine(
         original_prompt=prompt,
         current_plan=str(plan),
         critic_feedback=feedback,
+        rendered_images=list(rendered_images or []),
     )
     print(f"[Refinement] Generated {len(plan_fixes)} fixes")
 
@@ -144,9 +146,18 @@ def _collect_issue_lines(issues: Sequence[Any]) -> List[str]:
             continue
 
         parts = []
-        frame = issue.get("frame")
-        if frame is not None:
-            parts.append(f"frame={frame}")
+        frames = issue.get("frames")
+        if frames:
+            parts.append(f"frames={frames}")
+        else:
+            frame_start = issue.get("frame_start")
+            frame_end = issue.get("frame_end")
+            if frame_start is not None and frame_end is not None:
+                parts.append(f"frames={frame_start}-{frame_end}")
+            else:
+                frame = issue.get("frame")
+                if frame is not None:
+                    parts.append(f"frame={frame}")
 
         joint = issue.get("joint")
         if joint:

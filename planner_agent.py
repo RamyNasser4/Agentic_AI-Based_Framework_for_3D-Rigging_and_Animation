@@ -7,6 +7,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain.chat_models import init_chat_model
 from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
@@ -24,6 +25,11 @@ PLANNER_SYSTEM_PROMPT = """You are an animation planner. Given a user's request,
 - Effective rotation equals the sum of the hierarchy chain plus the joint's local rotation.
 - Directions must use axis notation: +X, -X, +Y, -Y, +Z, -Z
 - These correspond to the object's local axes.
+- If Object JSON includes "Semantic direction inference", treat those semantic axes as
+  authoritative when confidence is high and needs_user_confirmation is false.
+- For forward motion, use the listed forward_axis. For upward motion, use up_axis. For
+  lateral/right-left decisions, use right_axis and its opposite.
+- Do not use root-bone orientation as a substitute for semantic direction.
 - Never treat a later step as a fresh pose. Every step starts from the exact accumulated
   state produced by all previous steps.
 - Never implicitly reset a joint to 0 degrees unless an explicit opposite delta is written.
@@ -180,7 +186,7 @@ few_shots = [
         "object": "racoon",
         "object_json": (
            """name:metarig,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine.001,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine.002,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine.003,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:spine.006,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:ear.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:ear.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.3,0.9)],name:shoulder.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:upper_arm.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:forearm.L,position:(0.0,0.0,0.0),rotation:(0.4,0.0,0.0,0.9),children:[name:hand.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:shoulder.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:upper_arm.R,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.3,0.9),children:[name:forearm.R,position:(0.0,0.0,0.0),rotation:(-0.2,-0.1,0.6,0.7),children:[name:hand.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.2,1.0),children:[name:hand.R.001,position:(0.0,-0.2,0.0),rotation:(0.0,0.0,-0.1,1.0)]]]],name:breast.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:breast.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:pelvis.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:pelvis.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:thigh.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:shin.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:foot.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:toe.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:heel.02.L,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:thigh.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:shin.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:foot.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:toe.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),name:heel.02.R,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:tail,position:(0.0,0.0,0.0),rotation:(-0.2,0.3,0.2,0.9),children:[name:tail.001,position:(0.0,0.0,0.0),rotation:(-0.3,0.0,0.2,0.9),children:[name:tail.002,position:(0.0,0.0,0.0),rotation:(0.0,-0.5,0.5,0.7),children:[name:tail.003,position:(0.0,0.0,0.0),rotation:(-0.6,0.0,0.0,0.8)]]]]]
-Root axis +Z: (0.0, 0.0, 1.0); axis +X: (1.0, 0.0, 0.0); axis +Y: (0.0, -1.0, 0.0)"""
+Semantic direction inference: forward_axis=+Z, up_axis=+Y, right_axis=+X, is_humanoid=false, confidence=0.95, needs_user_confirmation=false"""
         ),
         "user_prompt": "Animate the raccoon standing still while nodding its head up and down.",
         "plan": (
@@ -198,7 +204,7 @@ Root axis +Z: (0.0, 0.0, 1.0); axis +X: (1.0, 0.0, 0.0); axis +Y: (0.0, -1.0, 0.
             "children:[name:Tail,position:(0.0000,0.0196,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Tail_end,position:(0.0000,0.0133,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]],name:TopFlipper.L,position:(-0.0107,0.0087,-0.0087),rotation:(-0.4,0.0,0.3,0.9),children:[name:MidFlipper.L,position:(0.0000,0.0067,0.0000),rotation:(0.0,0.1,0.0,1.0)," 
             "children:[name:BottomFlipper.L,position:(0.0000,0.0043,0.0000),rotation:(0.0,0.0,-0.1,1.0),children:[name:BottomFlipper.L_end,position:(0.0000,0.0076,0.0000),rotation:(0.0,0.0,0.0,1.0)]]],name:TopFlipper.R,position:(0.0092,0.0078,-0.0084),rotation:(-0.4,0.0,-0.3,0.9),children:[name:MidFlipper.R,position:(0.0000,0.0082,0.0000),rotation:(0.1,-0.1,0.1,1.0)," 
             "children:[name:BottomFlipper.R,position:(0.0000,0.0053,0.0000),rotation:(0.0,0.0,0.2,1.0),children:[name:BottomFlipper.R_end,position:(0.0000,0.0072,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]]]]. " 
-            "Root axis +Z: (0.00, 1.00, 0.00); axis +X: (1.00, 0.00, 0.00); axis +Y: (0.00, 0.00,-1.00). "
+            "Semantic direction inference: forward_axis=+Z, up_axis=+Y, right_axis=+X, is_humanoid=false, confidence=0.96, needs_user_confirmation=false. "
         ),
         "user_prompt": "Create a swim animation for the whale.",
         "plan": (
@@ -211,7 +217,7 @@ Root axis +Z: (0.0, 0.0, 1.0); axis +X: (1.0, 0.0, 0.0); axis +Y: (0.0, -1.0, 0.
     {
     "object": "human male",
     "object_json": ("name:bvh_output000075,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Pelvis,position:(0.0,-0.8,0.4),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.1,1.0),children:[name:Left_ankle,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,0.0,1.0),children:[name:Left_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Right_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_ankle,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0),children:[name:Right_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Spine1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Neck,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Head,position:(0.0,0.0,0.0),rotation:(0.1,0.0,0.0,1.0)],name:Left_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.3,0.9),children:[name:Left_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,0.1,-0.4,0.9),children:[name:Left_elbow,position:(0.0,0.0,0.0),rotation:(0.3,0.0,0.1,1.0),children:[name:Left_wrist,position:(0.0,0.0,0.0),rotation:(0.0,0.2,0.0,1.0),children:[name:Left_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]],name:Right_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.4,0.9),children:[name:Right_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,-0.1,0.3,0.9),children:[name:Right_elbow,position:(0.0,0.0,0.0),rotation:(0.2,0.0,-0.1,1.0),children:[name:Right_wrist,position:(0.0,0.0,0.0),rotation:(0.0,-0.2,0.0,1.0),children:[name:Right_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]]]]]]]"
-                    "Root forward direction: (0.0, 0.5, -0.9); right direction: (1.0, 0.0, 0.0); up direction: (0.0, 0.9, 0.5)"),
+                    "Semantic direction inference: forward_axis=-Z, up_axis=+Y, right_axis=+X, is_humanoid=true, confidence=0.97, needs_user_confirmation=false"),
     "user_prompt": "a man walking forward slowly.",
     "plan": (
         "Step 1: Move bvh_output000075 -Z 0 units; rotate Pelvis +X 0 degrees; rotate Spine1 -X 3 degrees -Z 4 degrees; rotate Left_hip +X 0 degrees; rotate Right_hip +X 0 degrees; rotate Left_knee +X 0 degrees; rotate Right_knee +X 0 degrees; rotate Left_ankle -X 6 degrees; rotate Right_ankle -X 12 degrees; rotate Left_shoulder -Z 20 degrees; rotate Right_shoulder +Z 20 degrees; rotate Left_elbow +X 0 degrees; rotate Right_elbow +X 0 degrees;"
@@ -223,7 +229,7 @@ Root axis +Z: (0.0, 0.0, 1.0); axis +X: (1.0, 0.0, 0.0); axis +Y: (0.0, -1.0, 0.
     {
     "object": "human male",
     "object_json": ("name:bvh_output000075,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Pelvis,position:(0.0,-0.8,0.4),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.1,1.0),children:[name:Left_ankle,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,0.0,1.0),children:[name:Left_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Right_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_ankle,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0),children:[name:Right_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Spine1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Neck,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Head,position:(0.0,0.0,0.0),rotation:(0.1,0.0,0.0,1.0)],name:Left_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.3,0.9),children:[name:Left_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,0.1,-0.4,0.9),children:[name:Left_elbow,position:(0.0,0.0,0.0),rotation:(0.3,0.0,0.1,1.0),children:[name:Left_wrist,position:(0.0,0.0,0.0),rotation:(0.0,0.2,0.0,1.0),children:[name:Left_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]],name:Right_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.4,0.9),children:[name:Right_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,-0.1,0.3,0.9),children:[name:Right_elbow,position:(0.0,0.0,0.0),rotation:(0.2,0.0,-0.1,1.0),children:[name:Right_wrist,position:(0.0,0.0,0.0),rotation:(0.0,-0.2,0.0,1.0),children:[name:Right_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]]]]]]]"
-                    "Root forward direction: (0.0, 0.5, -0.9); right direction: (1.0, 0.0, 0.0); up direction: (0.0, 0.9, 0.5)"),
+                    "Semantic direction inference: forward_axis=-Z, up_axis=+Y, right_axis=+X, is_humanoid=true, confidence=0.97, needs_user_confirmation=false"),
     "user_prompt": "the person is standing relaxed, walks forward then turns around on their left foot, and walks back to their original position.",
     "plan": (
         "Step 1: Move bvh_output000100 +X 0 units +Y 0 units +Z 0 units; rotate Pelvis -X 3 degrees +Y 6 degrees -Z 2 degrees; rotate Spine1 -X 3 degrees -Z 4 degrees; rotate Left_hip +X 0 degrees; rotate Right_hip +X 0 degrees; rotate Left_knee +X 0 degrees; rotate Right_knee +X 0 degrees; rotate Left_ankle -X 6 degrees; rotate Right_ankle -X 6 degrees; rotate Left_shoulder -Z 15 degrees; rotate Right_shoulder +Z 15 degrees;"
@@ -297,16 +303,33 @@ def get_llm(model: str):
     #               temperature=0.65,
     #               use_responses_api=True,
     #           )
-    return ChatOpenAI(
-        model="zai-org/GLM-5.2:novita",
-        base_url="https://router.huggingface.co/v1",
-        api_key=getenv("HF_TOKEN"),
-        temperature=0,
-    )
+    # return ChatOpenAI(
+    #     model="zai-org/GLM-5.2:novita",
+    #     base_url="https://router.huggingface.co/v1",
+    #     api_key=getenv("HF_TOKEN"),
+    #     temperature=0,
+    # )
     # return ChatGoogleGenerativeAI(
     #     model="gemma-4-31b-it",
     #     google_api_key=getenv("GOOGLE_API_KEY"),
     #     temperature=0
+    # )
+    return ChatGoogleGenerativeAI(
+        model="gemini-3.5-flash",
+        google_api_key=getenv("GOOGLE_API_KEY"),
+        temperature=0,
+        thinking_budget=-1
+    )
+    # return ChatNVIDIA(
+    #     model="z-ai/glm-5.1",
+    #     api_key="", 
+    #     temperature=0
+    # )
+    # return ChatOpenAI(
+    #     model="@cf/zai-org/glm-5.2",
+    #     api_key=getenv("CLOUDFLARE_AUTH_TOKEN"),
+    #     base_url=f"https://api.cloudflare.com/client/v4/accounts/{getenv('CLOUDFLARE_ACCOUNT_ID')}/ai/v1",
+    #     temperature=0,
     # )
 example_prompt = ChatPromptTemplate.from_messages([
     ("human", "Object: **{object}**. Object JSON: {object_json}. Request: {user_prompt}."),

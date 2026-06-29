@@ -35,6 +35,8 @@ SYSTEM_MESSAGE = (
     "If no previous animation is provided, start the new animation at 0.0s. "
     "If a previous animation is provided, start the new animation at the provided start time, which is the end time of the previous animation, and continue smoothly from the last keyframes of that previous animation. "
     "When generating motion that includes translation, align the root and any body-facing rotations with the translation direction so the character or object faces where it is moving. "
+    "If Object JSON includes \"Semantic direction inference\", treat forward_axis, up_axis, and right_axis as the trusted semantic local axes when converting plan directions into keyframes. "
+    "Do not infer semantic facing from root-bone orientation. "
     "If the translation direction changes, update rotation smoothly to follow that new direction and avoid rotations that contradict the path of travel. "
     "When an animated element has both translation keyframes in [] and rotation keyframes in (), the rotation keyframe timestamps must match the translation keyframe timestamps exactly so the motion stays synchronized across position and rotation. "
     "STRICT FORMATTING RULES (MUST FOLLOW): "
@@ -73,7 +75,7 @@ SYSTEM_MESSAGE = (
     "children:[name:Tail,position:(0.0000,0.0196,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Tail_end,position:(0.0000,0.0133,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]],name:TopFlipper.L,position:(-0.0107,0.0087,-0.0087),rotation:(-0.4,0.0,0.3,0.9),children:[name:MidFlipper.L,position:(0.0000,0.0067,0.0000),rotation:(0.0,0.1,0.0,1.0)," \
     "children:[name:BottomFlipper.L,position:(0.0000,0.0043,0.0000),rotation:(0.0,0.0,-0.1,1.0),children:[name:BottomFlipper.L_end,position:(0.0000,0.0076,0.0000),rotation:(0.0,0.0,0.0,1.0)]]],name:TopFlipper.R,position:(0.0092,0.0078,-0.0084),rotation:(-0.4,0.0,-0.3,0.9),children:[name:MidFlipper.R,position:(0.0000,0.0082,0.0000),rotation:(0.1,-0.1,0.1,1.0)," \
     "children:[name:BottomFlipper.R,position:(0.0000,0.0053,0.0000),rotation:(0.0,0.0,0.2,1.0),children:[name:BottomFlipper.R_end,position:(0.0000,0.0072,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]]]].\n" \
-    "Root forward direction: (0.00, 1.00, 0.00); right direction: (1.00, 0.00, 0.00); up direction: (0.00, 0.00,-1.00)." \
+    "Semantic direction inference: forward_axis=+Z, up_axis=+Y, right_axis=+X, is_humanoid=false, confidence=0.96, needs_user_confirmation=false." \
     "Instruction: create the swim animation for the whale: " \
     "Start time: 0.0s." \
     "Armature,[0.00,0.00,0.00,0.00],[2.79,0.00,0.00,0.00]\n" \
@@ -154,7 +156,7 @@ animation_examples = [
                     "heel.02.R,position:(0.00,0.00,0.00),rotation:(0.6,0.6,-0.2,0.5),"
                     "name:toe.R,position:(0.00,0.00,0.00),rotation:(0.3,0.8,-0.4,0.3)"
                     "]]]]]"
-                    "Root forward direction: (0.00, 1.00, 0.00); right direction: (1.00, 0.00, 0.00); up direction: (0.00, 0.00,-1.00)."
+                    "Semantic direction inference: forward_axis=+Z, up_axis=+Y, right_axis=+X, is_humanoid=false, confidence=0.95, needs_user_confirmation=false."
         ),
         "user_instruction": "idle while moving head up and down",
         "start_time": "0.0s",
@@ -176,7 +178,7 @@ animation_examples = [
             "children:[name:Tail,position:(0.0000,0.0196,0.0000),rotation:(0.0,0.0,0.0,1.0),children:[name:Tail_end,position:(0.0000,0.0133,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]],name:TopFlipper.L,position:(-0.0107,0.0087,-0.0087),rotation:(-0.4,0.0,0.3,0.9),children:[name:MidFlipper.L,position:(0.0000,0.0067,0.0000),rotation:(0.0,0.1,0.0,1.0)," \
             "children:[name:BottomFlipper.L,position:(0.0000,0.0043,0.0000),rotation:(0.0,0.0,-0.1,1.0),children:[name:BottomFlipper.L_end,position:(0.0000,0.0076,0.0000),rotation:(0.0,0.0,0.0,1.0)]]],name:TopFlipper.R,position:(0.0092,0.0078,-0.0084),rotation:(-0.4,0.0,-0.3,0.9),children:[name:MidFlipper.R,position:(0.0000,0.0082,0.0000),rotation:(0.1,-0.1,0.1,1.0)," \
             "children:[name:BottomFlipper.R,position:(0.0000,0.0053,0.0000),rotation:(0.0,0.0,0.2,1.0),children:[name:BottomFlipper.R_end,position:(0.0000,0.0072,0.0000),rotation:(0.0,0.0,0.0,1.0)]]]]]]." \
-            "Root forward direction: (0.00, 1.00, 0.00); right direction: (1.00, 0.00, 0.00); up direction: (0.00, 0.00,-1.00)." \
+            "Semantic direction inference: forward_axis=+Z, up_axis=+Y, right_axis=+X, is_humanoid=false, confidence=0.96, needs_user_confirmation=false." \
         ),
         "user_instruction": "create a swim animation for the whale",
         "start_time": "1.2s",
@@ -219,7 +221,7 @@ animation_examples = [
             "name:Right_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.4,0.9),children:["
             "name:Right_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,-0.2,0.2,1.0),children:["
             "name:Right_elbow,position:(0.0,0.0,0.0),rotation:(0.2,-0.2,-0.1,1.0)]]]]]]]]]"
-            "Root forward direction: (0.0, 0.4, -0.9); right direction: (1.0, 0.0, 0.0); up direction: (0.0, 0.9, 0.4)"
+            "Semantic direction inference: forward_axis=-Z, up_axis=+Y, right_axis=+X, is_humanoid=true, confidence=0.97, needs_user_confirmation=false"
         ),
         "user_instruction": "the standing person kicks with their left foot before going back to their original stance.",
         "start_time": "0.0s",
@@ -276,7 +278,7 @@ animation_examples = [
             "name:Left_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,0.1,-0.3,1.0)]],"
             "name:Right_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.4,0.9),children:["
             "name:Right_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,-0.2,0.2,1.0)]]]]]]]"
-            "Root forward direction: (0.0, 0.4, -0.9); right direction: (1.0, 0.0, 0.0); up direction: (0.0, 0.9, 0.4)"
+            "Semantic direction inference: forward_axis=-Z, up_axis=+Y, right_axis=+X, is_humanoid=true, confidence=0.97, needs_user_confirmation=false"
         ),
         "user_instruction": "the person is standing relaxed, walks forward then turns around on their left foot, and walks back to their original position.",
         "start_time": "1.6s",

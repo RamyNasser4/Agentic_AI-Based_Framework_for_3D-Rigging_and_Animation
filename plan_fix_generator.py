@@ -3,25 +3,40 @@ from __future__ import annotations
 import json
 from os import getenv
 import re
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
+import numpy as np
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+try:
+    from .multimodal_utils import extract_response_text, image_to_data_url, parse_response_json
+except ImportError:  # pragma: no cover - direct script fallback
+    from multimodal_utils import extract_response_text, image_to_data_url, parse_response_json
 
-PLAN_FIX_SYSTEM_PROMPT = """You are a plan fix generator for a Blender animation pipeline.
+
+PLAN_FIX_SYSTEM_PROMPT = """You are a multimodal Plan Refiner for a Blender animation pipeline.
 
 You receive:
 - the original user motion prompt
 - the current numbered animation plan
 - critic observations about rendered skeleton frames
+- the same sampled rendered skeleton images that were given to the critic
 
 Your job:
+- Verify critic observations against the rendered images.
+- Use the images to understand pose quality, timing, coordination, and motion phase.
+- Determine which existing plan step caused the visible issue.
 - Convert critic observations into concrete, local edits to existing plan steps.
-- Modify only the steps needed to address the visible observations.
+- Modify only the step or steps needed to address the visible observations.
 - Preserve the user's original intent.
 - Preserve all unrelated plan steps and actions.
 - Do not regenerate the whole plan.
+- Produce the minimum number of edits required.
+
+The critic diagnoses what is wrong. The rendered images explain why it is wrong. The current
+plan explains how the motion was generated. You are the only module responsible for deciding
+how to modify the plan.
 
 Return STRICT JSON only with this exact shape:
 {
@@ -41,7 +56,12 @@ Rules:
 - new_text must be the direct replacement for old_text.
 - Use concrete animation operations only: rotate/move, joint name, axis token, numeric magnitude, and units.
 - Prefer changing existing rotation magnitudes, timing/phase actions, or visible limb coordination.
+- Modify only the existing step that caused the visual issue whenever possible.
+- Preserve all unrelated actions in that step exactly.
+- Do not add new steps.
+- Do not replace the whole plan.
 - Do not create vague suggestions such as "increase realism" or "make it better".
+- Do not introduce edits that only change root/world translation.
 - Do not edit root/world translation to address travel distance, locomotion distance, forward displacement, or movement through world space.
 - If the observations do not justify a concrete visible body-motion edit, return {"plan_fixes": []}.
 - Return valid JSON only. No markdown. No prose outside JSON."""
@@ -57,6 +77,7 @@ def generate_plan_fixes(
     original_prompt: str,
     current_plan: str,
     critic_feedback: Dict[str, Any],
+    rendered_images: Optional[List[np.ndarray]] = None,
 ) -> List[Dict[str, Any]]:
     if not _has_feedback_issues(critic_feedback):
         return []
@@ -67,19 +88,41 @@ def generate_plan_fixes(
         temperature=0,
     )
 
-    messages = [
-        SystemMessage(content=PLAN_FIX_SYSTEM_PROMPT),
-        HumanMessage(
-            content=(
+    content: List[Dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
                 "Original user prompt:\n"
                 f"{str(original_prompt or '').strip()}\n\n"
                 "Current numbered animation plan:\n"
                 f"{str(current_plan or '').strip()}\n\n"
                 "Critic observations JSON:\n"
                 f"{json.dumps(critic_feedback or {}, ensure_ascii=True, indent=2)}\n\n"
-                "Return strict JSON plan fixes only."
-            )
-        ),
+                "The following images are the same sampled skeleton renders that were given "
+                "to the critic. Use them to verify the observations and localize the minimal "
+                "plan edit. Return strict JSON plan fixes only."
+            ),
+        }
+    ]
+    for index, image in enumerate(rendered_images or [], start=1):
+        content.append(
+            {
+                "type": "text",
+                "text": f"Sampled skeleton image {index}",
+            }
+        )
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_to_data_url(image),
+                },
+            }
+        )
+
+    messages = [
+        SystemMessage(content=PLAN_FIX_SYSTEM_PROMPT),
+        HumanMessage(content=content),
     ]
 
     last_error: Exception | None = None
@@ -89,7 +132,10 @@ def generate_plan_fixes(
     for _ in range(3):
         try:
             response = llm.invoke(retry_messages)
-            payload = _parse_response_json(_extract_response_text(response.content))
+            payload = parse_response_json(
+                extract_response_text(response.content),
+                "Plan refiner returned an empty response.",
+            )
             return _validate_plan_fixes(payload, valid_steps)
         except Exception as error:
             last_error = error
@@ -102,7 +148,7 @@ def generate_plan_fixes(
                 )
             ]
 
-    raise ValueError(f"Plan fix generator failed to return valid JSON: {last_error}") from last_error
+    raise ValueError(f"Plan refiner failed to return valid JSON: {last_error}") from last_error
 
 
 def _has_feedback_issues(feedback: Dict[str, Any]) -> bool:
@@ -117,38 +163,6 @@ def _has_feedback_issues(feedback: Dict[str, Any]) -> bool:
 
 def _plan_step_numbers(plan_text: str) -> set[int]:
     return {int(match.group(1)) for match in _STEP_PATTERN.finditer(str(plan_text or ""))}
-
-
-def _extract_response_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: List[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-                continue
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts).strip()
-    return str(content)
-
-
-def _parse_response_json(text: str) -> dict:
-    candidate = text.strip()
-    if not candidate:
-        raise ValueError("Plan fix generator returned an empty response.")
-
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise
-        return json.loads(candidate[start : end + 1])
 
 
 def _validate_plan_fixes(payload: dict, valid_steps: Sequence[int] | set[int]) -> List[Dict[str, Any]]:
@@ -178,6 +192,10 @@ def _validate_plan_fixes(payload: dict, valid_steps: Sequence[int] | set[int]) -
             raise ValueError(
                 f"plan_fixes[{index}] must include non-empty reason, old_text, and new_text."
             )
+        if _is_translation_only_edit(old_text, new_text):
+            raise ValueError(
+                f"plan_fixes[{index}] must not introduce a root/world translation-only edit."
+            )
 
         validated.append(
             {
@@ -189,3 +207,20 @@ def _validate_plan_fixes(payload: dict, valid_steps: Sequence[int] | set[int]) -
         )
 
     return validated
+
+
+def _is_translation_only_edit(old_text: str, new_text: str) -> bool:
+    combined = f"{old_text} {new_text}".lower()
+    if "rotate " in combined:
+        return False
+    if "move " not in combined:
+        return False
+    blocked_terms = (
+        "root",
+        "world",
+        "travel distance",
+        "locomotion distance",
+        "forward displacement",
+        "movement through world",
+    )
+    return any(term in combined for term in blocked_terms)

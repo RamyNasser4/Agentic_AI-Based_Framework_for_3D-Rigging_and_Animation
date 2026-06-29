@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import base64
-import json
 from os import getenv
 from typing import Any, Dict, List
 
-import cv2
 import numpy as np
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
-import base64
 
+try:
+    from .multimodal_utils import extract_response_text, image_to_data_url, parse_response_json
+except ImportError:  # pragma: no cover - direct script fallback
+    from multimodal_utils import extract_response_text, image_to_data_url, parse_response_json
 
 
 CRITIC_SYSTEM_PROMPT = """You are a strict animation critic and evaluator.
@@ -21,7 +19,10 @@ You will receive:
 - the user's motion prompt
 - a small ordered set of skeleton-render images on black backgrounds
 
-Each image includes a visible frame number label. Use that visible frame number in all issue.frame fields.
+Each image includes a visible frame number label. Use those visible frame numbers to localize
+every issue with either:
+- frame_start and frame_end, when the issue spans a visible range
+- frames, when the issue appears in one or more specific sampled frames
 
 IMPORTANT:
 The rendered skeleton images are character-centered.
@@ -61,7 +62,8 @@ Return STRICT JSON only with this exact shape:
     "issues": [
       {
         "description": "...",
-        "frame": int,
+        "frame_start": int,
+        "frame_end": int,
         "joint": "...",
         "reason": "..."
       }
@@ -72,7 +74,7 @@ Return STRICT JSON only with this exact shape:
     "issues": [
       {
         "joint": "...",
-        "frame": int,
+        "frames": [int],
         "type": "constraint_violation | discontinuity | unnatural_motion",
         "description": "...",
         "reason": "..."
@@ -84,6 +86,9 @@ Return STRICT JSON only with this exact shape:
 Rules:
 - Scores must be floats in the range [0.0, 1.0].
 - Use empty lists when there are no issues.
+- Every issue must include either integer frame_start and frame_end fields, or a non-empty
+  frames list of integers.
+- If an issue appears in only one sampled frame, use frames: [frame_number].
 - Each issue must describe what looks wrong, where it appears wrong, and why it appears wrong.
 - Do not include keys named suggestion, edit, old_text, new_text, angle, degrees, increase_rotation, or parameter_change.
 - Do not mention missing root movement, missing forward displacement, missing travel distance, or lack of world-space movement.
@@ -108,7 +113,8 @@ def evaluate_motion(prompt: str, images: List[np.ndarray]) -> dict:
             "text": (
                 "User motion prompt:\n"
                 f"{prompt}\n\n"
-                "Evaluate the sampled motion frames and return strict JSON only."
+                "Evaluate the sampled motion frames and return strict JSON only. "
+                "Use frame_start/frame_end or frames for every issue."
             ),
         }
     ]
@@ -117,7 +123,7 @@ def evaluate_motion(prompt: str, images: List[np.ndarray]) -> dict:
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": _image_to_data_url(image),
+                    "url": image_to_data_url(image),
                 },
             }
         )
@@ -132,7 +138,10 @@ def evaluate_motion(prompt: str, images: List[np.ndarray]) -> dict:
     for _ in range(3):
         try:
             response = llm.invoke(retry_messages)
-            parsed = _parse_response_json(_extract_response_text(response.content))
+            parsed = parse_response_json(
+                extract_response_text(response.content),
+                "Critic returned an empty response.",
+            )
             _validate_feedback(parsed)
             _remove_translation_issues(parsed)
             return parsed
@@ -145,46 +154,6 @@ def evaluate_motion(prompt: str, images: List[np.ndarray]) -> dict:
             ]
 
     raise ValueError(f"Critic failed to return valid JSON: {last_error}") from last_error
-
-
-def _image_to_data_url(image: np.ndarray) -> str:
-    success, encoded = cv2.imencode(".png", image)
-    if not success:
-        raise ValueError("Failed to encode skeleton image as PNG.")
-    encoded_bytes = base64.b64encode(encoded.tobytes()).decode("ascii")
-    return f"data:image/png;base64,{encoded_bytes}"
-
-
-def _extract_response_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: List[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-                continue
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts).strip()
-    return str(content)
-
-
-def _parse_response_json(text: str) -> dict:
-    candidate = text.strip()
-    if not candidate:
-        raise ValueError("Critic returned an empty response.")
-
-    try:
-        return json.loads(candidate)
-    except json.JSONDecodeError:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise
-        return json.loads(candidate[start : end + 1])
 
 
 def _validate_feedback(payload: dict) -> None:
@@ -216,9 +185,7 @@ def _validate_feedback(payload: dict) -> None:
             reason = issue.get("reason")
             if not isinstance(reason, str) or not reason.strip():
                 raise ValueError(f"`{section_name}.issues[].reason` must be non-empty.")
-            frame = issue.get("frame")
-            if not isinstance(frame, int):
-                raise ValueError(f"`{section_name}.issues[].frame` must be an integer.")
+            _validate_issue_frames(issue, section_name)
 
     if "priority_fixes" in payload:
         raise ValueError("Critic payload must not include `priority_fixes`; observations only.")
@@ -240,6 +207,38 @@ def _reject_plan_edit_fields(issue: Dict[str, Any]) -> None:
     present = forbidden_keys.intersection(issue)
     if present:
         raise ValueError(f"Critic issue contains plan-edit fields: {sorted(present)}")
+
+
+def _validate_issue_frames(issue: Dict[str, Any], section_name: str) -> None:
+    frames = issue.get("frames")
+    frame_start = issue.get("frame_start")
+    frame_end = issue.get("frame_end")
+
+    if isinstance(frames, list) and frames:
+        if not all(isinstance(frame, int) for frame in frames):
+            raise ValueError(f"`{section_name}.issues[].frames` must contain only integers.")
+        issue.pop("frame", None)
+        return
+
+    if frame_start is not None or frame_end is not None:
+        if not isinstance(frame_start, int) or not isinstance(frame_end, int):
+            raise ValueError(
+                f"`{section_name}.issues[]` must include integer frame_start and frame_end."
+            )
+        if frame_end < frame_start:
+            raise ValueError(f"`{section_name}.issues[].frame_end` must be >= frame_start.")
+        issue.pop("frame", None)
+        return
+
+    legacy_frame = issue.get("frame")
+    if isinstance(legacy_frame, int):
+        issue["frames"] = [legacy_frame]
+        issue.pop("frame", None)
+        return
+
+    raise ValueError(
+        f"`{section_name}.issues[]` must include either frames or frame_start/frame_end."
+    )
 
 
 def _remove_translation_issues(payload: dict) -> None:
