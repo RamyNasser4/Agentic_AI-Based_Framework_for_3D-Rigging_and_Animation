@@ -5,6 +5,7 @@ from os import getenv
 from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain.chat_models import init_chat_model
+from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 
@@ -206,6 +207,36 @@ Root axis +Z: (0.0, 0.0, 1.0); axis +X: (1.0, 0.0, 0.0); axis +Y: (0.0, -1.0, 0.
             "Step 4: Move Armature +Z 1 units; rotate Spine1 +Y 10 degrees; rotate Spine2 +Y 5 degrees; rotate Head +Y 5 degrees; rotate TopFlipper.L +Z 10 degrees; rotate TopFlipper.R +Z 10 degrees; rotate Tail +Y 10 degrees;"
         )
     },
+    {
+    "object": "human male",
+    "object_json": ("name:bvh_output000075,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Pelvis,position:(0.0,-0.8,0.4),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.1,1.0),children:[name:Left_ankle,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,0.0,1.0),children:[name:Left_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Right_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_ankle,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0),children:[name:Right_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Spine1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Neck,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Head,position:(0.0,0.0,0.0),rotation:(0.1,0.0,0.0,1.0)],name:Left_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.3,0.9),children:[name:Left_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,0.1,-0.4,0.9),children:[name:Left_elbow,position:(0.0,0.0,0.0),rotation:(0.3,0.0,0.1,1.0),children:[name:Left_wrist,position:(0.0,0.0,0.0),rotation:(0.0,0.2,0.0,1.0),children:[name:Left_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]],name:Right_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.4,0.9),children:[name:Right_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,-0.1,0.3,0.9),children:[name:Right_elbow,position:(0.0,0.0,0.0),rotation:(0.2,0.0,-0.1,1.0),children:[name:Right_wrist,position:(0.0,0.0,0.0),rotation:(0.0,-0.2,0.0,1.0),children:[name:Right_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]]]]]]]"
+                    "Root forward direction: (0.0, 0.5, -0.9); right direction: (1.0, 0.0, 0.0); up direction: (0.0, 0.9, 0.5)"),
+    "user_prompt": "a man walking forward slowly.",
+    "plan": (
+        "Step 1: Move bvh_output000075 -Z 0 units; rotate Pelvis +X 0 degrees; rotate Spine1 -X 3 degrees -Z 4 degrees; rotate Left_hip +X 0 degrees; rotate Right_hip +X 0 degrees; rotate Left_knee +X 0 degrees; rotate Right_knee +X 0 degrees; rotate Left_ankle -X 6 degrees; rotate Right_ankle -X 12 degrees; rotate Left_shoulder -Z 20 degrees; rotate Right_shoulder +Z 20 degrees; rotate Left_elbow +X 0 degrees; rotate Right_elbow +X 0 degrees;"
+        "Step 2: Move bvh_output000075 -Z 1 units; rotate Pelvis +X 5 degrees -Y 3 degrees; rotate Spine1 +X 8 degrees -Y 6 degrees +Z 1 degrees; rotate Left_hip -X 20 degrees -Z 5 degrees; rotate Right_hip +X 25 degrees +Z 5 degrees; rotate Left_knee +X 35 degrees; rotate Right_knee -X 10 degrees; rotate Left_ankle -X 14 degrees; rotate Right_ankle +X 2 degrees; rotate Left_shoulder -X 25 degrees +Z 5 degrees; rotate Right_shoulder +X 20 degrees -Z 5 degrees; rotate Left_elbow +X 20 degrees; rotate Right_elbow -X 15 degrees;"
+        "Step 3: Move bvh_output000075 -Z 1 units; rotate Pelvis -X 6 degrees +Y 8 degrees; rotate Spine1 -X 6 degrees +Y 11 degrees +Z 1 degrees; rotate Left_hip +X 50 degrees +Z 10 degrees; rotate Right_hip -X 45 degrees -Z 10 degrees; rotate Left_knee -X 40 degrees; rotate Right_knee +X 55 degrees; rotate Left_ankle +X 5 degrees; rotate Right_ankle -X 10 degrees; rotate Left_shoulder +X 50 degrees -Z 30 degrees; rotate Right_shoulder -X 45 degrees +Z 30 degrees; rotate Left_elbow -X 40 degrees; rotate Right_elbow +X 35 degrees;"
+        "Step 4: Move bvh_output000075 -Z 1 units; rotate Pelvis +X 4 degrees -Y 12 degrees; rotate Spine1 +X 4 degrees -Y 12 degrees +Z 0 degrees; rotate Left_hip -X 25 degrees -Z 10 degrees; rotate Right_hip +X 25 degrees +Z 10 degrees; rotate Left_knee +X 45 degrees; rotate Right_knee -X 50 degrees; rotate Left_ankle -X 5 degrees; rotate Right_ankle +X 5 degrees; rotate Left_shoulder -X 45 degrees +Z 15 degrees; rotate Right_shoulder +X 35 degrees -Z 15 degrees; rotate Left_elbow +X 38 degrees; rotate Right_elbow -X 53 degrees;"
+    )
+    },
+    {
+    "object": "human male",
+    "object_json": ("name:bvh_output000075,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Pelvis,position:(0.0,-0.8,0.4),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.1,1.0),children:[name:Left_ankle,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,0.0,1.0),children:[name:Left_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Right_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_ankle,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0),children:[name:Right_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Spine1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Neck,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Head,position:(0.0,0.0,0.0),rotation:(0.1,0.0,0.0,1.0)],name:Left_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.3,0.9),children:[name:Left_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,0.1,-0.4,0.9),children:[name:Left_elbow,position:(0.0,0.0,0.0),rotation:(0.3,0.0,0.1,1.0),children:[name:Left_wrist,position:(0.0,0.0,0.0),rotation:(0.0,0.2,0.0,1.0),children:[name:Left_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]],name:Right_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.4,0.9),children:[name:Right_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,-0.1,0.3,0.9),children:[name:Right_elbow,position:(0.0,0.0,0.0),rotation:(0.2,0.0,-0.1,1.0),children:[name:Right_wrist,position:(0.0,0.0,0.0),rotation:(0.0,-0.2,0.0,1.0),children:[name:Right_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]]]]]]]"
+                    "Root forward direction: (0.0, 0.5, -0.9); right direction: (1.0, 0.0, 0.0); up direction: (0.0, 0.9, 0.5)"),
+    "user_prompt": "the person is standing relaxed, walks forward then turns around on their left foot, and walks back to their original position.",
+    "plan": (
+        "Step 1: Move bvh_output000100 +X 0 units +Y 0 units +Z 0 units; rotate Pelvis -X 3 degrees +Y 6 degrees -Z 2 degrees; rotate Spine1 -X 3 degrees -Z 4 degrees; rotate Left_hip +X 0 degrees; rotate Right_hip +X 0 degrees; rotate Left_knee +X 0 degrees; rotate Right_knee +X 0 degrees; rotate Left_ankle -X 6 degrees; rotate Right_ankle -X 6 degrees; rotate Left_shoulder -Z 15 degrees; rotate Right_shoulder +Z 15 degrees;"
+        "Step 2: Move bvh_output000100 +X 6 units -Z 18 units; rotate Pelvis -X 1 degrees -Y 5 degrees +Z 4 degrees; rotate Spine1 +X 2 degrees -Y 3 degrees +Z 3 degrees; rotate Left_hip -X 20 degrees -Z 5 degrees; rotate Right_hip +X 25 degrees +Z 5 degrees; rotate Left_knee +X 30 degrees; rotate Right_knee -X 10 degrees; rotate Left_ankle -X 10 degrees; rotate Right_ankle +X 5 degrees; rotate Left_shoulder -X 20 degrees +Z 5 degrees; rotate Right_shoulder +X 18 degrees -Z 5 degrees; rotate Left_elbow +X 15 degrees; rotate Right_elbow -X 12 degrees;"
+        "Step 3: Move bvh_output000100 -X 6 units -Z 23 units; rotate Pelvis -X 1 degrees -Y 1 degrees -Z 1 degrees; rotate Spine1 -X 1 degrees +Y 1 degrees -Z 1 degrees; rotate Left_hip +X 35 degrees +Z 8 degrees; rotate Right_hip -X 30 degrees -Z 8 degrees; rotate Left_knee -X 15 degrees; rotate Right_knee +X 40 degrees; rotate Left_ankle +X 5 degrees; rotate Right_ankle -X 10 degrees; rotate Left_shoulder +X 30 degrees -Z 10 degrees; rotate Right_shoulder -X 25 degrees +Z 10 degrees; rotate Left_elbow -X 20 degrees; rotate Right_elbow +X 18 degrees;"
+        "Step 4: Move bvh_output000100 -X 5 units -Z 46 units; rotate Pelvis -X 2 degrees +Y 10 degrees -Z 4 degrees; rotate Spine1 -X 2 degrees +Y 8 degrees -Z 3 degrees; rotate Left_hip -X 25 degrees -Z 5 degrees; rotate Right_hip +X 20 degrees +Z 5 degrees; rotate Left_knee +X 35 degrees; rotate Right_knee -X 15 degrees; rotate Left_ankle -X 15 degrees; rotate Right_ankle +X 8 degrees; rotate Left_shoulder -X 22 degrees +Z 5 degrees; rotate Right_shoulder +X 18 degrees -Z 5 degrees; rotate Left_elbow +X 18 degrees; rotate Right_elbow -X 15 degrees;"
+        "Step 5: Move bvh_output000100 +X 6 units -Z 21 units; rotate Pelvis -X 3 degrees -Y 23 degrees +Z 9 degrees; rotate Spine1 -X 3 degrees -Y 15 degrees +Z 6 degrees; rotate Left_hip +X 10 degrees +Z 3 degrees; rotate Right_hip -X 5 degrees -Z 3 degrees; rotate Left_knee +X 5 degrees; rotate Right_knee +X 5 degrees; rotate Left_ankle -X 5 degrees; rotate Right_ankle -X 5 degrees; rotate Left_shoulder +X 5 degrees -Z 5 degrees; rotate Right_shoulder -X 5 degrees +Z 5 degrees; rotate Left_elbow -X 5 degrees; rotate Right_elbow +X 5 degrees;"
+        "Step 6: Move bvh_output000100 +X 6 units -Z 10 units; rotate Pelvis +X 130 degrees -Y 16 degrees +Z 176 degrees; rotate Spine1 +X 125 degrees -Y 12 degrees +Z 170 degrees; rotate Left_hip +X 15 degrees -Z 5 degrees; rotate Right_hip -X 10 degrees +Z 5 degrees; rotate Left_knee +X 10 degrees; rotate Right_knee +X 5 degrees; rotate Left_ankle -X 8 degrees; rotate Right_ankle -X 5 degrees; rotate Left_shoulder +X 10 degrees +Z 5 degrees; rotate Right_shoulder -X 8 degrees -Z 5 degrees;"
+        "Step 7: Move bvh_output000100 +X 6 units +Z 14 units; rotate Pelvis -X 1 degrees +Y 12 degrees +Z 5 degrees; rotate Spine1 -X 1 degrees +Y 8 degrees +Z 3 degrees; rotate Left_hip -X 20 degrees +Z 5 degrees; rotate Right_hip +X 25 degrees -Z 5 degrees; rotate Left_knee +X 30 degrees; rotate Right_knee -X 10 degrees; rotate Left_ankle -X 10 degrees; rotate Right_ankle +X 5 degrees; rotate Left_shoulder -X 18 degrees -Z 5 degrees; rotate Right_shoulder +X 15 degrees +Z 5 degrees; rotate Left_elbow +X 14 degrees; rotate Right_elbow -X 12 degrees;"
+        "Step 8: Move bvh_output000100 -X 8 units +Z 25 units; rotate Pelvis -X 1 degrees -Y 1 degrees -Z 1 degrees; rotate Spine1 -X 1 degrees +Y 1 degrees -Z 1 degrees; rotate Left_hip +X 32 degrees -Z 8 degrees; rotate Right_hip -X 28 degrees +Z 8 degrees; rotate Left_knee -X 15 degrees; rotate Right_knee +X 38 degrees; rotate Left_ankle +X 5 degrees; rotate Right_ankle -X 10 degrees; rotate Left_shoulder +X 28 degrees +Z 8 degrees; rotate Right_shoulder -X 22 degrees -Z 8 degrees; rotate Left_elbow -X 18 degrees; rotate Right_elbow +X 16 degrees;"
+        "Step 9: Move bvh_output000100 -X 8 units +Z 25 units; rotate Pelvis -X 1 degrees +Y 4 degrees -Z 1 degrees; rotate Spine1 -X 1 degrees +Y 3 degrees -Z 1 degrees; rotate Left_hip -X 22 degrees +Z 5 degrees; rotate Right_hip +X 18 degrees -Z 5 degrees; rotate Left_knee +X 28 degrees; rotate Right_knee -X 12 degrees; rotate Left_ankle -X 12 degrees; rotate Right_ankle +X 6 degrees; rotate Left_shoulder -X 20 degrees -Z 5 degrees; rotate Right_shoulder +X 16 degrees +Z 5 degrees; rotate Left_elbow +X 16 degrees; rotate Right_elbow -X 14 degrees;"
+        "Step 10: Move bvh_output000100 +X 5 units +Z 19 units; rotate Pelvis -X 1 degrees +Y 4 degrees +Z 2 degrees; rotate Spine1 -X 1 degrees +Y 2 degrees +Z 1 degrees; rotate Left_hip +X 5 degrees -Z 3 degrees; rotate Right_hip -X 5 degrees +Z 3 degrees; rotate Left_knee -X 10 degrees; rotate Right_knee -X 15 degrees; rotate Left_ankle +X 3 degrees; rotate Right_ankle +X 3 degrees; rotate Left_shoulder +X 5 degrees +Z 3 degrees; rotate Right_shoulder -X 5 degrees -Z 3 degrees; rotate Left_elbow -X 8 degrees; rotate Right_elbow +X 8 degrees;"
+    )
+    }
 ]
 
 FREE_MODELS = [
@@ -454,7 +485,7 @@ class QuaternionConverter:
             for joint_name, quaternion in self.apply_step(step):
                 qx, qy, qz, qw = quaternion
                 output_lines.append(
-                    f"{joint_name}, ({qx:.6f}, {qy:.6f}, {qz:.6f}, {qw:.6f})"
+                    f"{joint_name}, ({qx:.2f}, {qy:.2f}, {qz:.2f}, {qw:.2f})"
                 )
 
         return "\n".join(output_lines)
@@ -519,15 +550,28 @@ def run_llm(object_name, object_json, user_prompt):
     })
 
 
+def run_pipeline(object_name, object_json, user_prompt, converter=None):
+    plan_text = run_llm(object_name, object_json, user_prompt)
+    converter = converter or QuaternionConverter()
+
+    try:
+        quaternion_output = converter.process(plan_text)
+    except ValueError as error:
+        raise ValueError(f"Failed to convert generated plan to quaternions: {error}") from error
+
+    return plan_text, quaternion_output
+
+
 if __name__ == "__main__":
     planner = PlannerAgent()
-    planner.initialize_chain()
-
     whale_object_json = planner.get_example_object_json("whale")
-    whale_plan = planner.invoke_chain({
-        "object": "whale",
-        "object_json": whale_object_json,
-        "user_prompt": "Create tilt tail animation",
-    })
+    whale_plan, whale_quaternions = run_pipeline(
+        "whale",
+        whale_object_json,
+        "Create tilt tail animation",
+    )
 
+    print("Raw plan:")
     print(whale_plan)
+    print("\nQuaternion output:")
+    print(whale_quaternions)
