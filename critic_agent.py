@@ -4,13 +4,27 @@ from os import getenv
 from typing import Any, Dict, List
 
 import numpy as np
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 try:
     from .multimodal_utils import extract_response_text, image_to_data_url, parse_response_json
 except ImportError:  # pragma: no cover - direct script fallback
     from multimodal_utils import extract_response_text, image_to_data_url, parse_response_json
+
+_AI_DEPENDENCY_MESSAGE = (
+    "The AI critic dependencies are not installed. Install the Grad planner/keyframe "
+    "AI dependencies, including langchain-core and langchain-google-genai, then run "
+    "the AI planner feature again. UniRig API features do not require these packages."
+)
+
+
+def _import_critic_ai_dependencies():
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from langchain_google_genai import ChatGoogleGenerativeAI
+    except ImportError as error:
+        raise RuntimeError(_AI_DEPENDENCY_MESSAGE) from error
+
+    return HumanMessage, SystemMessage, ChatGoogleGenerativeAI
 
 
 CRITIC_SYSTEM_PROMPT = """You are a strict animation critic and evaluator.
@@ -100,6 +114,8 @@ Rules:
 def evaluate_motion(prompt: str, images: List[np.ndarray]) -> dict:
     if not images:
         raise ValueError("evaluate_motion requires at least one rendered image.")
+
+    HumanMessage, SystemMessage, ChatGoogleGenerativeAI = _import_critic_ai_dependencies()
 
     llm = ChatGoogleGenerativeAI(
         model="gemma-4-31b-it",

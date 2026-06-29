@@ -1,19 +1,39 @@
 from os import getenv
 import re
 
-from dotenv import load_dotenv
-from langchain.chat_models import init_chat_model
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-
 try:
     from .Blender_Executer import prepare_animation_text_for_execution
 except ImportError:
     from Blender_Executer import prepare_animation_text_for_execution
 
-load_dotenv()
+_AI_DEPENDENCY_MESSAGE = (
+    "The AI keyframe dependencies are not installed. Install the Grad planner/keyframe "
+    "AI dependencies, including langchain-core, langchain-google-genai, "
+    "langchain-openai, langchain-nvidia-ai-endpoints, and python-dotenv, then run "
+    "the AI planner feature again. UniRig API features do not require these packages."
+)
+
+
+def _load_dotenv_for_ai():
+    try:
+        from dotenv import load_dotenv
+    except ImportError as error:
+        raise RuntimeError(_AI_DEPENDENCY_MESSAGE) from error
+
+    load_dotenv()
+
+
+def _import_keyframe_ai_dependencies():
+    _load_dotenv_for_ai()
+
+    try:
+        from langchain_core.output_parsers import StrOutputParser
+        from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
+        from langchain_google_genai import ChatGoogleGenerativeAI
+    except ImportError as error:
+        raise RuntimeError(_AI_DEPENDENCY_MESSAGE) from error
+
+    return ChatPromptTemplate, FewShotChatMessagePromptTemplate, StrOutputParser, ChatGoogleGenerativeAI
 
 SYSTEM_MESSAGE = (
     "You're an animator who will be provided the joints on a rigged 3D model, and you have to rotate them to produce the requested animation. "
@@ -318,6 +338,13 @@ class KeyFrameAgent:
     )
 
     def initialize_chain(self):
+        (
+            ChatPromptTemplate,
+            FewShotChatMessagePromptTemplate,
+            StrOutputParser,
+            ChatGoogleGenerativeAI,
+        ) = _import_keyframe_ai_dependencies()
+
         # llm = init_chat_model(
         #     model="gpt-oss-120b:free",
         #     model_provider="openai",

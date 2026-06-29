@@ -2,16 +2,43 @@
 import math
 import re
 from os import getenv
-from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain.chat_models import init_chat_model
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_nvidia_ai_endpoints import ChatNVIDIA
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 
-load_dotenv()
+_AI_DEPENDENCY_MESSAGE = (
+    "The AI planner dependencies are not installed. Install the Grad planner/keyframe "
+    "AI dependencies, including langchain-core, langchain-google-genai, "
+    "langchain-openai, langchain-nvidia-ai-endpoints, and python-dotenv, then run "
+    "the AI planner feature again. UniRig API features do not require these packages."
+)
+
+
+def _load_dotenv_for_ai():
+    try:
+        from dotenv import load_dotenv
+    except ImportError as error:
+        raise RuntimeError(_AI_DEPENDENCY_MESSAGE) from error
+
+    load_dotenv()
+
+
+def _import_prompt_dependencies():
+    try:
+        from langchain_core.output_parsers import StrOutputParser
+        from langchain_core.prompts import ChatPromptTemplate, FewShotChatMessagePromptTemplate
+    except ImportError as error:
+        raise RuntimeError(_AI_DEPENDENCY_MESSAGE) from error
+
+    return ChatPromptTemplate, FewShotChatMessagePromptTemplate, StrOutputParser
+
+
+def _import_google_llm():
+    _load_dotenv_for_ai()
+
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+    except ImportError as error:
+        raise RuntimeError(_AI_DEPENDENCY_MESSAGE) from error
+
+    return ChatGoogleGenerativeAI
 
 # Updated Planner System Prompt to match the required step-by-step, joint-specific axis output
 PLANNER_SYSTEM_PROMPT = """You are an animation planner. Given a user's request, the object JSON hierarchy, and local axis basis, you will produce a clear, sequential plan detailing how to move the necessary joints to perform the given motion.
@@ -277,6 +304,8 @@ FREE_MODELS = [
 ]
 
 def get_llm(model: str):
+    ChatGoogleGenerativeAI = _import_google_llm()
+
     # return init_chat_model(
     #     model=model,
     #     model_provider="openai",
@@ -331,26 +360,28 @@ def get_llm(model: str):
     #     base_url=f"https://api.cloudflare.com/client/v4/accounts/{getenv('CLOUDFLARE_ACCOUNT_ID')}/ai/v1",
     #     temperature=0,
     # )
-example_prompt = ChatPromptTemplate.from_messages([
-    ("human", "Object: **{object}**. Object JSON: {object_json}. Request: {user_prompt}."),
-    ("ai", "{plan}"),
-])
+def build_prompt_template():
+    ChatPromptTemplate, FewShotChatMessagePromptTemplate, _StrOutputParser = _import_prompt_dependencies()
 
-few_shot_prompt = FewShotChatMessagePromptTemplate(
-    examples=few_shots,
-    example_prompt=example_prompt,
-)
+    example_prompt = ChatPromptTemplate.from_messages([
+        ("human", "Object: **{object}**. Object JSON: {object_json}. Request: {user_prompt}."),
+        ("ai", "{plan}"),
+    ])
 
-# Main prompt with few_shot_prompt injected between system and human
-prompt_template = ChatPromptTemplate.from_messages([
-    ("system", PLANNER_SYSTEM_PROMPT),
-    few_shot_prompt,
-    ("human", (
-        "The object you will make the animation plan for is **{object}**. "
-        "Object JSON: {object_json}. "
-        "The user's request is: {user_prompt}."
-    )),
-])
+    few_shot_prompt = FewShotChatMessagePromptTemplate(
+        examples=few_shots,
+        example_prompt=example_prompt,
+    )
+
+    return ChatPromptTemplate.from_messages([
+        ("system", PLANNER_SYSTEM_PROMPT),
+        few_shot_prompt,
+        ("human", (
+            "The object you will make the animation plan for is **{object}**. "
+            "Object JSON: {object_json}. "
+            "The user's request is: {user_prompt}."
+        )),
+    ])
 
 
 class QuaternionConverter:
@@ -532,8 +563,9 @@ class PlannerAgent:
         self.working_model = None
 
     def _build_chain(self, model: str):
+        _ChatPromptTemplate, _FewShotChatMessagePromptTemplate, StrOutputParser = _import_prompt_dependencies()
         llm = get_llm(model)
-        return prompt_template | llm | StrOutputParser()
+        return build_prompt_template() | llm | StrOutputParser()
 
     def initialize_chain(self, model: str | None = None):
         if model is None:
@@ -548,6 +580,12 @@ class PlannerAgent:
         if self.chain is not None:
             try:
                 return self.chain.invoke(input_dict)
+            except RuntimeError as error:
+                if str(error) == _AI_DEPENDENCY_MESSAGE:
+                    raise
+                print(f"{self.working_model} failed: {str(error)[:60]}")
+                self.chain = None
+                self.working_model = None
             except Exception as error:
                 print(f"{self.working_model} failed: {str(error)[:60]}")
                 self.chain = None
@@ -560,6 +598,13 @@ class PlannerAgent:
                 response = self.chain.invoke(input_dict)
                 print(f"Working model: {model}")
                 return response
+            except RuntimeError as error:
+                if str(error) == _AI_DEPENDENCY_MESSAGE:
+                    raise
+                print(f"{model} failed: {str(error)[:60]}")
+                self.chain = None
+                self.working_model = None
+                continue
             except Exception as error:
                 print(f"{model} failed: {str(error)[:60]}")
                 self.chain = None
