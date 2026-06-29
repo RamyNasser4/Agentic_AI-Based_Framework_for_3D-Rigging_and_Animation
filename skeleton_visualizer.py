@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+
+try:
+    from .mesh_renderer import RenderedFrame
+except ImportError:  # pragma: no cover - direct script fallback
+    from mesh_renderer import RenderedFrame
 
 try:
     from .skeleton_recorder import get_recorded_bone_edges, get_recorded_frame_numbers
@@ -14,90 +19,115 @@ except ImportError:  # pragma: no cover - direct script fallback
 FrameDict = Dict[str, Sequence[float]]
 
 FRONT_VIEW = (0, 2)  # XZ
-SIDE_VIEW = (1, 2)  # YZ
+RIGHT_VIEW = (1, 2)  # YZ
 TOP_VIEW = (0, 1)  # XY
 
 
-def render_skeleton_images(frames: List[FrameDict]) -> List[np.ndarray]:
-    if not frames:
-        return []
+class SkeletonVisualizer:
+    def render_collage_sequence(self, frames: List[FrameDict]) -> List[RenderedFrame]:
+        if not frames:
+            return []
 
-    sampled_indices = _sample_frame_indices(len(frames))
-    sampled_frames = [frames[index] for index in sampled_indices]
-    frame_numbers = get_recorded_frame_numbers()
-    print(f"[Visualizer] Sampled {len(sampled_frames)} frames")
+        sampled_indices = _sample_frame_indices(len(frames))
+        sampled_frames = [frames[index] for index in sampled_indices]
+        frame_numbers = get_recorded_frame_numbers()
+        print(f"[Visualizer] Sampled {len(sampled_frames)} frames")
 
-    front_scale = _compute_global_scale(sampled_frames, FRONT_VIEW)
-    side_scale = _compute_global_scale(sampled_frames, SIDE_VIEW)
-    top_scale = _compute_global_scale(sampled_frames, TOP_VIEW)
-    edges = get_recorded_bone_edges()
+        front_scale = _compute_global_scale(sampled_frames, FRONT_VIEW)
+        right_scale = _compute_global_scale(sampled_frames, RIGHT_VIEW)
+        top_scale = _compute_global_scale(sampled_frames, TOP_VIEW)
+        perspective_scale = _compute_global_perspective_scale(sampled_frames)
+        edges = get_recorded_bone_edges()
 
-    images: List[np.ndarray] = []
-    for source_index, frame in zip(sampled_indices, sampled_frames):
-        frame_label = frame_numbers[source_index] if len(frame_numbers) > source_index else source_index
-
-        print("[Visualizer] Rendering FRONT view")
-        front_image = _render_frame(
-            frame=frame,
-            frame_label=frame_label,
-            view_name="FRONT",
-            edges=edges,
-            projection_axes=FRONT_VIEW,
-            scale=front_scale,
-        )
-
-        print("[Visualizer] Rendering SIDE view")
-        side_image = _render_frame(
-            frame=frame,
-            frame_label=frame_label,
-            view_name="SIDE",
-            edges=edges,
-            projection_axes=SIDE_VIEW,
-            scale=side_scale,
-        )
-
-        print("[Visualizer] Rendering TOP view")
-        top_image = _render_frame(
-            frame=frame,
-            frame_label=frame_label,
-            view_name="TOP",
-            edges=edges,
-            projection_axes=TOP_VIEW,
-            scale=top_scale,
-        )
-
-        images.append(
-            _create_multiview_collage(
-                front_image=front_image,
-                side_image=side_image,
-                top_image=top_image,
-                frame_label=frame_label,
+        rendered_frames: List[RenderedFrame] = []
+        for source_index, frame in zip(sampled_indices, sampled_frames):
+            frame_label = (
+                frame_numbers[source_index]
+                if len(frame_numbers) > source_index
+                else source_index
             )
-        )
-        print(f"[Visualizer] Created collage for frame {frame_label}")
 
-    return images
+            print("[Visualizer] Rendering FRONT view")
+            front_image = _render_frame(
+                frame=frame,
+                view_name="FRONT",
+                edges=edges,
+                projection_axes=FRONT_VIEW,
+                scale=front_scale,
+            )
+
+            print("[Visualizer] Rendering RIGHT view")
+            right_image = _render_frame(
+                frame=frame,
+                view_name="RIGHT",
+                edges=edges,
+                projection_axes=RIGHT_VIEW,
+                scale=right_scale,
+            )
+
+            print("[Visualizer] Rendering TOP view")
+            top_image = _render_frame(
+                frame=frame,
+                view_name="TOP",
+                edges=edges,
+                projection_axes=TOP_VIEW,
+                scale=top_scale,
+            )
+
+            print("[Visualizer] Rendering PERSPECTIVE view")
+            perspective_image = _render_frame(
+                frame=frame,
+                view_name="PERSPECTIVE",
+                edges=edges,
+                projection_axes=None,
+                scale=perspective_scale,
+            )
+
+            rendered_frames.append(
+                RenderedFrame(
+                    frame_index=int(frame_label),
+                    collage=_create_multiview_collage(
+                        views=[
+                            front_image,
+                            right_image,
+                            top_image,
+                            perspective_image,
+                        ],
+                        frame_label=int(frame_label),
+                    ),
+                )
+            )
+            print(f"[Visualizer] Created collage for frame {frame_label}")
+
+        return rendered_frames
+
+
+def render_skeleton_images(frames: List[FrameDict]) -> List[np.ndarray]:
+    return [frame.collage for frame in SkeletonVisualizer().render_collage_sequence(frames)]
 
 
 def _create_multiview_collage(
-    front_image: np.ndarray,
-    side_image: np.ndarray,
-    top_image: np.ndarray,
+    views: Sequence[np.ndarray],
     frame_label: int,
 ) -> np.ndarray:
-    view_height, view_width = front_image.shape[:2]
+    if len(views) != 4:
+        raise ValueError("Skeleton collage requires exactly four views.")
+
+    view_height, view_width = views[0].shape[:2]
     header_height = 56
     collage = np.zeros(
         ((view_height * 2) + header_height, view_width * 2, 3),
         dtype=np.uint8,
     )
 
-    collage[header_height : header_height + view_height, 0:view_width] = front_image
-    collage[header_height : header_height + view_height, view_width : view_width * 2] = side_image
-    collage[
-        header_height + view_height : header_height + (view_height * 2),
-        0:view_width,
-    ] = top_image
+    placements = [
+        (0, header_height),
+        (view_width, header_height),
+        (0, header_height + view_height),
+        (view_width, header_height + view_height),
+    ]
+    for image, (x, y) in zip(views, placements):
+        collage[y : y + view_height, x : x + view_width] = image
 
     cv2.putText(
         collage,
@@ -170,6 +200,18 @@ def _compute_global_scale(frames: List[FrameDict], projection_axes: Tuple[int, i
     return span if span > 1e-6 else 1.0
 
 
+def _compute_global_perspective_scale(frames: List[FrameDict]) -> float:
+    points = _flatten_points(frames)
+    if points.size == 0:
+        return 1.0
+
+    projected = _project_perspective_points(points)
+    mins = projected.min(axis=0)
+    maxs = projected.max(axis=0)
+    span = float(np.max(maxs - mins))
+    return span if span > 1e-6 else 1.0
+
+
 def _flatten_points(frames: List[FrameDict]) -> np.ndarray:
     all_points: List[np.ndarray] = []
     for frame in frames:
@@ -184,10 +226,9 @@ def _flatten_points(frames: List[FrameDict]) -> np.ndarray:
 
 def _render_frame(
     frame: FrameDict,
-    frame_label: int,
     view_name: str,
     edges: List[Tuple[str, str]],
-    projection_axes: Tuple[int, int],
+    projection_axes: Optional[Tuple[int, int]],
     scale: float,
 ) -> np.ndarray:
     canvas_size = 512
@@ -197,7 +238,10 @@ def _render_frame(
     points_2d: Dict[str, Tuple[int, int]] = {}
     if frame:
         positions = np.asarray([frame[name][:3] for name in frame], dtype=np.float32)
-        projected = positions[:, projection_axes]
+        if projection_axes is None:
+            projected = _project_perspective_points(positions)
+        else:
+            projected = positions[:, projection_axes]
         center = projected.mean(axis=0)
         normalized = projected - center
         usable_size = canvas_size - (2.0 * margin)
@@ -230,3 +274,12 @@ def _render_frame(
     )
 
     return canvas
+
+
+def _project_perspective_points(points: np.ndarray) -> np.ndarray:
+    x = points[:, 0]
+    y = points[:, 1]
+    z = points[:, 2]
+    projected_x = (x - y) * 0.7071
+    projected_y = (z * 0.9) - ((x + y) * 0.35)
+    return np.stack([projected_x, projected_y], axis=1)

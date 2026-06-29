@@ -27,6 +27,14 @@ PLANNER_SYSTEM_PROMPT = """You are an animation planner. Given a user's request,
 - These correspond to the object's local axes.
 - If Object JSON includes "Semantic direction inference", treat those semantic axes as
   authoritative when confidence is high and needs_user_confirmation is false.
+  # Rotation sign example
+    If forward_axis=-Y and the right arm hangs at rest (pointing -Z when up=+Z),
+    and you want the arm to point FORWARD (-Y world direction):
+    - You need to swing the arm from -Z toward -Y.
+    - The rotation axis for this is +X (right-hand rule: thumb right, fingers curl from -Z to -Y).
+    - Write: rotate right_shoulder +Z 90 degrees   (because +Z plan = forward direction axis)
+    - NOT: rotate right_shoulder -Y 90 degrees  (that is a world axis, not a plan axis)
+    - NOT: rotate right_shoulder -X 90 degrees  (wrong sign)
 - For forward motion, use the listed forward_axis. For upward motion, use up_axis. For
   lateral/right-left decisions, use right_axis and its opposite.
 - Do not use root-bone orientation as a substitute for semantic direction.
@@ -190,10 +198,10 @@ Semantic direction inference: forward_axis=+Z, up_axis=+Y, right_axis=+X, is_hum
         ),
         "user_prompt": "Animate the raccoon standing still while nodding its head up and down.",
         "plan": (
-            "Step 1: Rotate spine.006 +Z 10 degrees; rotate tail +Y 5 degrees;"
-            "Step 2: Rotate spine.006 -Z 10 degrees; rotate tail -Y 10 degrees;"
-            "Step 3: Rotate spine.006 +Z 10 degrees; rotate tail +Y 10 degrees;"
-            "Step 4: Rotate spine.006 -Z 10 degrees; rotate tail -Y 5 degrees;"
+            "Step 1: Rotate spine.006 +X 10 degrees; rotate tail +Y 5 degrees;"
+            "Step 2: Rotate spine.006 -X 10 degrees; rotate tail -Y 10 degrees;"
+            "Step 3: Rotate spine.006 +X 10 degrees; rotate tail +Y 10 degrees;"
+            "Step 4: Rotate spine.006 -X 10 degrees; rotate tail -Y 5 degrees;"
         ),
     },
     {
@@ -214,36 +222,7 @@ Semantic direction inference: forward_axis=+Z, up_axis=+Y, right_axis=+X, is_hum
             "Step 4: Move Armature +Z 1 units; rotate Spine1 +Y 10 degrees; rotate Spine2 +Y 5 degrees; rotate Head +Y 5 degrees; rotate TopFlipper.L +Z 10 degrees; rotate TopFlipper.R +Z 10 degrees; rotate Tail +Y 10 degrees;"
         )
     },
-    {
-    "object": "human male",
-    "object_json": ("name:bvh_output000075,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Pelvis,position:(0.0,-0.8,0.4),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.1,1.0),children:[name:Left_ankle,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,0.0,1.0),children:[name:Left_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Right_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_ankle,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0),children:[name:Right_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Spine1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Neck,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Head,position:(0.0,0.0,0.0),rotation:(0.1,0.0,0.0,1.0)],name:Left_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.3,0.9),children:[name:Left_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,0.1,-0.4,0.9),children:[name:Left_elbow,position:(0.0,0.0,0.0),rotation:(0.3,0.0,0.1,1.0),children:[name:Left_wrist,position:(0.0,0.0,0.0),rotation:(0.0,0.2,0.0,1.0),children:[name:Left_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]],name:Right_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.4,0.9),children:[name:Right_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,-0.1,0.3,0.9),children:[name:Right_elbow,position:(0.0,0.0,0.0),rotation:(0.2,0.0,-0.1,1.0),children:[name:Right_wrist,position:(0.0,0.0,0.0),rotation:(0.0,-0.2,0.0,1.0),children:[name:Right_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]]]]]]]"
-                    "Semantic direction inference: forward_axis=-Z, up_axis=+Y, right_axis=+X, is_humanoid=true, confidence=0.97, needs_user_confirmation=false"),
-    "user_prompt": "a man walking forward slowly.",
-    "plan": (
-        "Step 1: Move bvh_output000075 -Z 0 units; rotate Pelvis +X 0 degrees; rotate Spine1 -X 3 degrees -Z 4 degrees; rotate Left_hip +X 0 degrees; rotate Right_hip +X 0 degrees; rotate Left_knee +X 0 degrees; rotate Right_knee +X 0 degrees; rotate Left_ankle -X 6 degrees; rotate Right_ankle -X 12 degrees; rotate Left_shoulder -Z 20 degrees; rotate Right_shoulder +Z 20 degrees; rotate Left_elbow +X 0 degrees; rotate Right_elbow +X 0 degrees;"
-        "Step 2: Move bvh_output000075 -Z 1 units; rotate Pelvis +X 5 degrees -Y 3 degrees; rotate Spine1 +X 8 degrees -Y 6 degrees +Z 1 degrees; rotate Left_hip -X 20 degrees -Z 5 degrees; rotate Right_hip +X 25 degrees +Z 5 degrees; rotate Left_knee +X 35 degrees; rotate Right_knee -X 10 degrees; rotate Left_ankle -X 14 degrees; rotate Right_ankle +X 2 degrees; rotate Left_shoulder -X 25 degrees +Z 5 degrees; rotate Right_shoulder +X 20 degrees -Z 5 degrees; rotate Left_elbow +X 20 degrees; rotate Right_elbow -X 15 degrees;"
-        "Step 3: Move bvh_output000075 -Z 1 units; rotate Pelvis -X 6 degrees +Y 8 degrees; rotate Spine1 -X 6 degrees +Y 11 degrees +Z 1 degrees; rotate Left_hip +X 50 degrees +Z 10 degrees; rotate Right_hip -X 45 degrees -Z 10 degrees; rotate Left_knee -X 40 degrees; rotate Right_knee +X 55 degrees; rotate Left_ankle +X 5 degrees; rotate Right_ankle -X 10 degrees; rotate Left_shoulder +X 50 degrees -Z 30 degrees; rotate Right_shoulder -X 45 degrees +Z 30 degrees; rotate Left_elbow -X 40 degrees; rotate Right_elbow +X 35 degrees;"
-        "Step 4: Move bvh_output000075 -Z 1 units; rotate Pelvis +X 4 degrees -Y 12 degrees; rotate Spine1 +X 4 degrees -Y 12 degrees +Z 0 degrees; rotate Left_hip -X 25 degrees -Z 10 degrees; rotate Right_hip +X 25 degrees +Z 10 degrees; rotate Left_knee +X 45 degrees; rotate Right_knee -X 50 degrees; rotate Left_ankle -X 5 degrees; rotate Right_ankle +X 5 degrees; rotate Left_shoulder -X 45 degrees +Z 15 degrees; rotate Right_shoulder +X 35 degrees -Z 15 degrees; rotate Left_elbow +X 38 degrees; rotate Right_elbow -X 53 degrees;"
-    )
-    },
-    {
-    "object": "human male",
-    "object_json": ("name:bvh_output000075,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Pelvis,position:(0.0,-0.8,0.4),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Left_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.1,1.0),children:[name:Left_ankle,position:(0.0,0.0,0.0),rotation:(-0.1,0.0,0.0,1.0),children:[name:Left_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Right_hip,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_knee,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Right_ankle,position:(0.0,0.0,0.0),rotation:(-0.2,0.0,0.0,1.0),children:[name:Right_foot,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]],name:Spine1,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine2,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Spine3,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Neck,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0),children:[name:Head,position:(0.0,0.0,0.0),rotation:(0.1,0.0,0.0,1.0)],name:Left_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,-0.3,0.9),children:[name:Left_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,0.1,-0.4,0.9),children:[name:Left_elbow,position:(0.0,0.0,0.0),rotation:(0.3,0.0,0.1,1.0),children:[name:Left_wrist,position:(0.0,0.0,0.0),rotation:(0.0,0.2,0.0,1.0),children:[name:Left_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]],name:Right_collar,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.4,0.9),children:[name:Right_shoulder,position:(0.0,0.0,0.0),rotation:(0.0,-0.1,0.3,0.9),children:[name:Right_elbow,position:(0.0,0.0,0.0),rotation:(0.2,0.0,-0.1,1.0),children:[name:Right_wrist,position:(0.0,0.0,0.0),rotation:(0.0,-0.2,0.0,1.0),children:[name:Right_palm,position:(0.0,0.0,0.0),rotation:(0.0,0.0,0.0,1.0)]]]]]]]]]"
-                    "Semantic direction inference: forward_axis=-Z, up_axis=+Y, right_axis=+X, is_humanoid=true, confidence=0.97, needs_user_confirmation=false"),
-    "user_prompt": "the person is standing relaxed, walks forward then turns around on their left foot, and walks back to their original position.",
-    "plan": (
-        "Step 1: Move bvh_output000100 +X 0 units +Y 0 units +Z 0 units; rotate Pelvis -X 3 degrees +Y 6 degrees -Z 2 degrees; rotate Spine1 -X 3 degrees -Z 4 degrees; rotate Left_hip +X 0 degrees; rotate Right_hip +X 0 degrees; rotate Left_knee +X 0 degrees; rotate Right_knee +X 0 degrees; rotate Left_ankle -X 6 degrees; rotate Right_ankle -X 6 degrees; rotate Left_shoulder -Z 15 degrees; rotate Right_shoulder +Z 15 degrees;"
-        "Step 2: Move bvh_output000100 +X 6 units -Z 18 units; rotate Pelvis -X 1 degrees -Y 5 degrees +Z 4 degrees; rotate Spine1 +X 2 degrees -Y 3 degrees +Z 3 degrees; rotate Left_hip -X 20 degrees -Z 5 degrees; rotate Right_hip +X 25 degrees +Z 5 degrees; rotate Left_knee +X 30 degrees; rotate Right_knee -X 10 degrees; rotate Left_ankle -X 10 degrees; rotate Right_ankle +X 5 degrees; rotate Left_shoulder -X 20 degrees +Z 5 degrees; rotate Right_shoulder +X 18 degrees -Z 5 degrees; rotate Left_elbow +X 15 degrees; rotate Right_elbow -X 12 degrees;"
-        "Step 3: Move bvh_output000100 -X 6 units -Z 23 units; rotate Pelvis -X 1 degrees -Y 1 degrees -Z 1 degrees; rotate Spine1 -X 1 degrees +Y 1 degrees -Z 1 degrees; rotate Left_hip +X 35 degrees +Z 8 degrees; rotate Right_hip -X 30 degrees -Z 8 degrees; rotate Left_knee -X 15 degrees; rotate Right_knee +X 40 degrees; rotate Left_ankle +X 5 degrees; rotate Right_ankle -X 10 degrees; rotate Left_shoulder +X 30 degrees -Z 10 degrees; rotate Right_shoulder -X 25 degrees +Z 10 degrees; rotate Left_elbow -X 20 degrees; rotate Right_elbow +X 18 degrees;"
-        "Step 4: Move bvh_output000100 -X 5 units -Z 46 units; rotate Pelvis -X 2 degrees +Y 10 degrees -Z 4 degrees; rotate Spine1 -X 2 degrees +Y 8 degrees -Z 3 degrees; rotate Left_hip -X 25 degrees -Z 5 degrees; rotate Right_hip +X 20 degrees +Z 5 degrees; rotate Left_knee +X 35 degrees; rotate Right_knee -X 15 degrees; rotate Left_ankle -X 15 degrees; rotate Right_ankle +X 8 degrees; rotate Left_shoulder -X 22 degrees +Z 5 degrees; rotate Right_shoulder +X 18 degrees -Z 5 degrees; rotate Left_elbow +X 18 degrees; rotate Right_elbow -X 15 degrees;"
-        "Step 5: Move bvh_output000100 +X 6 units -Z 21 units; rotate Pelvis -X 3 degrees -Y 23 degrees +Z 9 degrees; rotate Spine1 -X 3 degrees -Y 15 degrees +Z 6 degrees; rotate Left_hip +X 10 degrees +Z 3 degrees; rotate Right_hip -X 5 degrees -Z 3 degrees; rotate Left_knee +X 5 degrees; rotate Right_knee +X 5 degrees; rotate Left_ankle -X 5 degrees; rotate Right_ankle -X 5 degrees; rotate Left_shoulder +X 5 degrees -Z 5 degrees; rotate Right_shoulder -X 5 degrees +Z 5 degrees; rotate Left_elbow -X 5 degrees; rotate Right_elbow +X 5 degrees;"
-        "Step 6: Move bvh_output000100 +X 6 units -Z 10 units; rotate Pelvis +X 130 degrees -Y 16 degrees +Z 176 degrees; rotate Spine1 +X 125 degrees -Y 12 degrees +Z 170 degrees; rotate Left_hip +X 15 degrees -Z 5 degrees; rotate Right_hip -X 10 degrees +Z 5 degrees; rotate Left_knee +X 10 degrees; rotate Right_knee +X 5 degrees; rotate Left_ankle -X 8 degrees; rotate Right_ankle -X 5 degrees; rotate Left_shoulder +X 10 degrees +Z 5 degrees; rotate Right_shoulder -X 8 degrees -Z 5 degrees;"
-        "Step 7: Move bvh_output000100 +X 6 units +Z 14 units; rotate Pelvis -X 1 degrees +Y 12 degrees +Z 5 degrees; rotate Spine1 -X 1 degrees +Y 8 degrees +Z 3 degrees; rotate Left_hip -X 20 degrees +Z 5 degrees; rotate Right_hip +X 25 degrees -Z 5 degrees; rotate Left_knee +X 30 degrees; rotate Right_knee -X 10 degrees; rotate Left_ankle -X 10 degrees; rotate Right_ankle +X 5 degrees; rotate Left_shoulder -X 18 degrees -Z 5 degrees; rotate Right_shoulder +X 15 degrees +Z 5 degrees; rotate Left_elbow +X 14 degrees; rotate Right_elbow -X 12 degrees;"
-        "Step 8: Move bvh_output000100 -X 8 units +Z 25 units; rotate Pelvis -X 1 degrees -Y 1 degrees -Z 1 degrees; rotate Spine1 -X 1 degrees +Y 1 degrees -Z 1 degrees; rotate Left_hip +X 32 degrees -Z 8 degrees; rotate Right_hip -X 28 degrees +Z 8 degrees; rotate Left_knee -X 15 degrees; rotate Right_knee +X 38 degrees; rotate Left_ankle +X 5 degrees; rotate Right_ankle -X 10 degrees; rotate Left_shoulder +X 28 degrees +Z 8 degrees; rotate Right_shoulder -X 22 degrees -Z 8 degrees; rotate Left_elbow -X 18 degrees; rotate Right_elbow +X 16 degrees;"
-        "Step 9: Move bvh_output000100 -X 8 units +Z 25 units; rotate Pelvis -X 1 degrees +Y 4 degrees -Z 1 degrees; rotate Spine1 -X 1 degrees +Y 3 degrees -Z 1 degrees; rotate Left_hip -X 22 degrees +Z 5 degrees; rotate Right_hip +X 18 degrees -Z 5 degrees; rotate Left_knee +X 28 degrees; rotate Right_knee -X 12 degrees; rotate Left_ankle -X 12 degrees; rotate Right_ankle +X 6 degrees; rotate Left_shoulder -X 20 degrees -Z 5 degrees; rotate Right_shoulder +X 16 degrees +Z 5 degrees; rotate Left_elbow +X 16 degrees; rotate Right_elbow -X 14 degrees;"
-        "Step 10: Move bvh_output000100 +X 5 units +Z 19 units; rotate Pelvis -X 1 degrees +Y 4 degrees +Z 2 degrees; rotate Spine1 -X 1 degrees +Y 2 degrees +Z 1 degrees; rotate Left_hip +X 5 degrees -Z 3 degrees; rotate Right_hip -X 5 degrees +Z 3 degrees; rotate Left_knee -X 10 degrees; rotate Right_knee -X 15 degrees; rotate Left_ankle +X 3 degrees; rotate Right_ankle +X 3 degrees; rotate Left_shoulder +X 5 degrees +Z 3 degrees; rotate Right_shoulder -X 5 degrees -Z 3 degrees; rotate Left_elbow -X 8 degrees; rotate Right_elbow +X 8 degrees;"
-    )
-    }
+    
 ]
 
 FREE_MODELS = [
@@ -309,17 +288,17 @@ def get_llm(model: str):
     #     api_key=getenv("HF_TOKEN"),
     #     temperature=0,
     # )
-    # return ChatGoogleGenerativeAI(
-    #     model="gemma-4-31b-it",
-    #     google_api_key=getenv("GOOGLE_API_KEY"),
-    #     temperature=0
-    # )
     return ChatGoogleGenerativeAI(
-        model="gemini-3.5-flash",
+        model="gemma-4-31b-it",
         google_api_key=getenv("GOOGLE_API_KEY"),
-        temperature=0,
-        thinking_budget=-1
+        temperature=0
     )
+    # return ChatGoogleGenerativeAI(
+    #     model="gemini-3.5-flash",
+    #     google_api_key=getenv("GOOGLE_API_KEY"),
+    #     temperature=0,
+    #     thinking_budget=-1
+    # )
     # return ChatNVIDIA(
     #     model="z-ai/glm-5.1",
     #     api_key="", 
@@ -331,6 +310,7 @@ def get_llm(model: str):
     #     base_url=f"https://api.cloudflare.com/client/v4/accounts/{getenv('CLOUDFLARE_ACCOUNT_ID')}/ai/v1",
     #     temperature=0,
     # )
+    
 example_prompt = ChatPromptTemplate.from_messages([
     ("human", "Object: **{object}**. Object JSON: {object_json}. Request: {user_prompt}."),
     ("ai", "{plan}"),

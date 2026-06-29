@@ -549,7 +549,7 @@ def _execute_refinement_iteration(scene, job_state, item):
         job_state["final_animation"] = keyframes
         job_state["previous_animation"] = keyframes
 
-        _set_status(job_state, "Rendering skeleton frames")
+        _set_status(job_state, "Rendering visual evidence")
         _refresh_scene_output(scene, job_state)
         print(
             f"[Generator] Refinement Stage {iteration}: "
@@ -557,12 +557,18 @@ def _execute_refinement_iteration(scene, job_state, item):
         )
         skeleton_frames = extract_skeleton_frames(preview_armature_name)
         print(f"[Generator] Skeleton extraction completed for iteration {iteration}.")
+        visual = _build_visual_evidence_for_iteration(
+            prompt=job_state.get("user_prompt", ""),
+            armature_name=preview_armature_name,
+            skeleton_frames=skeleton_frames,
+            scene=bpy.data.scenes.get(job_state.get("preview_scene_name") or "") or bpy.context.scene,
+        )
 
         job_state["request_queue"].put(
             {
                 "type": "refinement_iteration_data",
                 "iteration": iteration,
-                "skeleton_frames": skeleton_frames,
+                "visual": visual,
             }
         )
     except Exception as error:
@@ -579,6 +585,27 @@ def _execute_refinement_iteration(scene, job_state, item):
         _set_status(job_state, f"Refinement iteration {iteration} failed")
         _refresh_scene_output(scene, job_state)
         _finalize_generation(scene, job_state)
+
+
+def _build_visual_evidence_for_iteration(prompt, armature_name, skeleton_frames, scene=None):
+    from .mesh_renderer import MeshRenderer, build_visual_evidence
+    from .skeleton_visualizer import SkeletonVisualizer
+
+    armature = bpy.data.objects.get(armature_name)
+    if armature is None:
+        raise ValueError(f"Armature `{armature_name}` was not found while building visual evidence.")
+
+    print(f"[Generator] Building VisualEvidence for `{armature_name}`.")
+    skeleton_collage_sequence = SkeletonVisualizer().render_collage_sequence(skeleton_frames)
+    frame_count = max(len(skeleton_collage_sequence), 1)
+    frame_objects = [[armature] for _ in range(frame_count)]
+    mesh_collage_sequence = MeshRenderer(scene=scene).render_collage_sequence(frame_objects)
+
+    return build_visual_evidence(
+        prompt=prompt,
+        mesh_collage_sequence=mesh_collage_sequence,
+        skeleton_collage_sequence=skeleton_collage_sequence,
+    )
 
 
 def _dispatch_next_step(scene, job_state):
@@ -783,7 +810,6 @@ def run_with_refinement(
     from .critic_agent import evaluate_motion
     from .refinement import generate_keyframes_for_plan, refine
     from .skeleton_recorder import extract_skeleton_frames
-    from .skeleton_visualizer import render_skeleton_images
 
     queue_mode = request_queue is not None and result_queue is not None
     active_scene = None if queue_mode else scene or bpy.context.scene
@@ -834,7 +860,12 @@ def run_with_refinement(
     feedback = {
         "faithfulness": {"score": 0.0, "issues": []},
         "realism": {"score": 0.0, "issues": []},
-        "priority_fixes": [],
+    }
+    critic_state = {
+        "iteration": 0,
+        "previous_issues": [],
+        "resolved_issues": [],
+        "previous_score": {},
     }
 
     for iteration in range(1, int(max_iters) + 1):
@@ -846,7 +877,7 @@ def run_with_refinement(
             )
 
         if queue_mode:
-            skeleton_frames = _request_refinement_iteration_execution(
+            visual = _request_refinement_iteration_execution(
                 request_queue=request_queue,
                 result_queue=result_queue,
                 iteration=iteration,
@@ -866,15 +897,12 @@ def run_with_refinement(
                 f"Extracting skeleton frames from `{execution_armature_name}`."
             )
             skeleton_frames = extract_skeleton_frames(execution_armature_name)
-
-        if result_queue is not None:
-            _queue_refinement_status(
-                result_queue,
-                "Rendering skeleton frames",
-                current_instruction=f"Iteration {iteration}",
+            visual = _build_visual_evidence_for_iteration(
+                prompt=prompt,
+                armature_name=execution_armature_name,
+                skeleton_frames=skeleton_frames,
+                scene=active_scene,
             )
-        print(f"[Generator] Refinement Stage {iteration}: Rendering skeleton frames.")
-        images = render_skeleton_images(skeleton_frames)
 
         if result_queue is not None:
             _queue_refinement_status(
@@ -884,7 +912,7 @@ def run_with_refinement(
                 animate=True,
             )
         print(f"[Generator] Refinement Stage {iteration}: Evaluating motion.")
-        feedback = evaluate_motion(prompt, images)
+        feedback = evaluate_motion(prompt, visual, critic_state=critic_state)
 
         faithfulness_score = float(feedback.get("faithfulness", {}).get("score", 0.0))
         realism_score = float(feedback.get("realism", {}).get("score", 0.0))
@@ -942,7 +970,7 @@ def run_with_refinement(
             object_name=active_object_name,
             object_json=object_json,
             prompt=prompt,
-            rendered_images=images,
+            visual=visual,
         )
         previous_score = score
 
@@ -980,7 +1008,7 @@ def _request_refinement_iteration_execution(
             raise RuntimeError(response.get("message") or "Refinement iteration failed in Blender.")
 
         if response_type == "refinement_iteration_data":
-            return response["skeleton_frames"]
+            return response["visual"]
 
 
 def _scene_has_preview(scene):

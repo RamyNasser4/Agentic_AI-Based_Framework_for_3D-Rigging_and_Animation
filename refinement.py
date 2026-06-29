@@ -26,7 +26,7 @@ def refine(
     object_name: str | None = None,
     object_json: str | None = None,
     prompt: str | None = None,
-    rendered_images: Sequence[Any] | None = None,
+    visual: Dict[str, Any] | None = None,
 ) -> Tuple[str, str]:
     if not object_name or not object_json or not prompt:
         raise ValueError(
@@ -36,12 +36,13 @@ def refine(
     observation_lines = _collect_feedback_observation_lines(feedback)
 
     print("[Refinement] Generating plan fixes...")
-    plan_fixes = generate_plan_fixes(
+    plan_fix_output = generate_plan_fixes(
         original_prompt=prompt,
         current_plan=str(plan),
         critic_feedback=feedback,
-        rendered_images=list(rendered_images or []),
+        visual=visual,
     )
+    plan_fixes = list(plan_fix_output.get("plan_fixes") or [])
     print(f"[Refinement] Generated {len(plan_fixes)} fixes")
 
     print("[Refinement] Applying fixes...")

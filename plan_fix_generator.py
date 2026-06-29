@@ -2,17 +2,33 @@ from __future__ import annotations
 
 import json
 from os import getenv
-import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
-import numpy as np
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from pydantic import BaseModel, ConfigDict, Field
 
 try:
-    from .multimodal_utils import extract_response_text, image_to_data_url, parse_response_json
+    from .mesh_renderer import VisualEvidence
+    from .multimodal_utils import compress_image_for_llm, extract_response_text, parse_response_json
 except ImportError:  # pragma: no cover - direct script fallback
-    from multimodal_utils import extract_response_text, image_to_data_url, parse_response_json
+    from mesh_renderer import VisualEvidence
+    from multimodal_utils import compress_image_for_llm, extract_response_text, parse_response_json
+
+
+class PlanFix(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step: int
+    reason: str = Field(min_length=1)
+    old_text: str = Field(min_length=1)
+    new_text: str = Field(min_length=1)
+
+
+class PlanFixOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_fixes: List[PlanFix]
 
 
 PLAN_FIX_SYSTEM_PROMPT = """You are a multimodal Plan Refiner for a Blender animation pipeline.
@@ -20,12 +36,12 @@ PLAN_FIX_SYSTEM_PROMPT = """You are a multimodal Plan Refiner for a Blender anim
 You receive:
 - the original user motion prompt
 - the current numbered animation plan
-- critic observations about rendered skeleton frames
-- the same sampled rendered skeleton images that were given to the critic
+- critic observations about rendered mesh frames
+- the same mesh_collages that were given to the critic
 
 Your job:
-- Verify critic observations against the rendered images.
-- Use the images to understand pose quality, timing, coordination, and motion phase.
+- Verify critic observations against the mesh_collages only.
+- Use the mesh_collages to understand pose quality, timing, coordination, and motion phase.
 - Determine which existing plan step caused the visible issue.
 - Convert critic observations into concrete, local edits to existing plan steps.
 - Modify only the step or steps needed to address the visible observations.
@@ -34,9 +50,10 @@ Your job:
 - Do not regenerate the whole plan.
 - Produce the minimum number of edits required.
 
-The critic diagnoses what is wrong. The rendered images explain why it is wrong. The current
+The critic diagnoses what is wrong. The mesh_collages explain why it is wrong. The current
 plan explains how the motion was generated. You are the only module responsible for deciding
-how to modify the plan.
+how to modify the plan. Do not request, trigger, recompute, regenerate, or assume any new
+renders.
 
 Return STRICT JSON only with this exact shape:
 {
@@ -67,20 +84,17 @@ Rules:
 - Return valid JSON only. No markdown. No prose outside JSON."""
 
 
-_STEP_PATTERN = re.compile(
-    r"Step\s+(\d+)\s*:\s*(.*?)(?=Step\s+\d+\s*:|\Z)",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
 def generate_plan_fixes(
     original_prompt: str,
     current_plan: str,
     critic_feedback: Dict[str, Any],
-    rendered_images: Optional[List[np.ndarray]] = None,
-) -> List[Dict[str, Any]]:
+    visual: Optional[VisualEvidence] = None,
+) -> Dict[str, List[Dict[str, Any]]]:
     if not _has_feedback_issues(critic_feedback):
-        return []
+        return {"plan_fixes": []}
+    mesh_collages = _mesh_collages(visual)
+    if not mesh_collages:
+        raise ValueError("generate_plan_fixes requires VisualEvidence with mesh_collages.")
 
     llm = ChatGoogleGenerativeAI(
         model="gemma-4-31b-it",
@@ -98,25 +112,28 @@ def generate_plan_fixes(
                 f"{str(current_plan or '').strip()}\n\n"
                 "Critic observations JSON:\n"
                 f"{json.dumps(critic_feedback or {}, ensure_ascii=True, indent=2)}\n\n"
-                "The following images are the same sampled skeleton renders that were given "
-                "to the critic. Use them to verify the observations and localize the minimal "
-                "plan edit. Return strict JSON plan fixes only."
+                "Use only the mesh_collages from the VisualEvidence that was given to the "
+                "critic. Do not use skeleton evidence as primary evidence. Do not trigger "
+                "or recompute rendering. Return strict JSON plan fixes only."
             ),
         }
     ]
-    for index, image in enumerate(rendered_images or [], start=1):
+    frame_indices = list((visual or {}).get("mesh_frame_indices") or [])
+    for index, image in enumerate(mesh_collages):
+        collage = _collage_image(image)
+        if collage is None:
+            continue
+        frame_index = frame_indices[index] if index < len(frame_indices) else index
         content.append(
             {
                 "type": "text",
-                "text": f"Sampled skeleton image {index}",
+                "text": f"Mesh collage frame {frame_index}",
             }
         )
         content.append(
             {
                 "type": "image_url",
-                "image_url": {
-                    "url": image_to_data_url(image),
-                },
+                "image_url": {"url": compress_image_for_llm(collage)},
             }
         )
 
@@ -127,7 +144,6 @@ def generate_plan_fixes(
 
     last_error: Exception | None = None
     retry_messages = list(messages)
-    valid_steps = _plan_step_numbers(current_plan)
 
     for _ in range(3):
         try:
@@ -136,7 +152,8 @@ def generate_plan_fixes(
                 extract_response_text(response.content),
                 "Plan refiner returned an empty response.",
             )
-            return _validate_plan_fixes(payload, valid_steps)
+            validated = PlanFixOutput.model_validate(payload)
+            return validated.model_dump()
         except Exception as error:
             last_error = error
             retry_messages = retry_messages + [
@@ -161,66 +178,13 @@ def _has_feedback_issues(feedback: Dict[str, Any]) -> bool:
     return bool(feedback.get("observations"))
 
 
-def _plan_step_numbers(plan_text: str) -> set[int]:
-    return {int(match.group(1)) for match in _STEP_PATTERN.finditer(str(plan_text or ""))}
+def _mesh_collages(visual: Optional[VisualEvidence]) -> List[Any]:
+    if not isinstance(visual, dict):
+        return []
+    return list(visual.get("mesh_collages") or [])
 
 
-def _validate_plan_fixes(payload: dict, valid_steps: Sequence[int] | set[int]) -> List[Dict[str, Any]]:
-    if not isinstance(payload, dict):
-        raise TypeError("Plan fix payload must be a JSON object.")
-
-    plan_fixes = payload.get("plan_fixes")
-    if not isinstance(plan_fixes, list):
-        raise ValueError("Plan fix payload must include a `plan_fixes` list.")
-
-    valid_step_set = set(valid_steps or [])
-    validated: List[Dict[str, Any]] = []
-    for index, fix in enumerate(plan_fixes, start=1):
-        if not isinstance(fix, dict):
-            raise ValueError(f"plan_fixes[{index}] must be an object.")
-
-        step = fix.get("step")
-        if not isinstance(step, int):
-            raise ValueError(f"plan_fixes[{index}].step must be an integer.")
-        if valid_step_set and step not in valid_step_set:
-            raise ValueError(f"plan_fixes[{index}].step references unknown Step {step}.")
-
-        reason = str(fix.get("reason") or "").strip()
-        old_text = str(fix.get("old_text") or "").strip()
-        new_text = str(fix.get("new_text") or "").strip()
-        if not reason or not old_text or not new_text:
-            raise ValueError(
-                f"plan_fixes[{index}] must include non-empty reason, old_text, and new_text."
-            )
-        if _is_translation_only_edit(old_text, new_text):
-            raise ValueError(
-                f"plan_fixes[{index}] must not introduce a root/world translation-only edit."
-            )
-
-        validated.append(
-            {
-                "step": step,
-                "reason": reason,
-                "old_text": old_text,
-                "new_text": new_text,
-            }
-        )
-
-    return validated
-
-
-def _is_translation_only_edit(old_text: str, new_text: str) -> bool:
-    combined = f"{old_text} {new_text}".lower()
-    if "rotate " in combined:
-        return False
-    if "move " not in combined:
-        return False
-    blocked_terms = (
-        "root",
-        "world",
-        "travel distance",
-        "locomotion distance",
-        "forward displacement",
-        "movement through world",
-    )
-    return any(term in combined for term in blocked_terms)
+def _collage_image(item: Any) -> Any:
+    if isinstance(item, dict):
+        return item.get("collage")
+    return getattr(item, "collage", item)

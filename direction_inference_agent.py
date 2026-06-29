@@ -1,30 +1,29 @@
 from __future__ import annotations
 
-import base64
 import json
 import math
 import os
-import tempfile
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-import cv2
 import numpy as np
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 try:
     import bpy  # type: ignore
-    from mathutils import Vector  # type: ignore
 except ImportError:  # pragma: no cover - Blender-only imports
     bpy = None
-    Vector = None
 
 try:
+    from .mesh_renderer import MeshRenderer, RenderedImage
+    from .multimodal_utils import compress_image_for_llm
     from .SceneParser import SceneParser
     from .skeleton_recorder import extract_skeleton_frames
     from .skeleton_visualizer import render_skeleton_images
 except ImportError:  # pragma: no cover - direct script fallback
+    from mesh_renderer import MeshRenderer, RenderedImage
+    from multimodal_utils import compress_image_for_llm
     from SceneParser import SceneParser
     from skeleton_recorder import extract_skeleton_frames
     from skeleton_visualizer import render_skeleton_images
@@ -67,13 +66,6 @@ Be conservative. Do not fabricate a confident answer."""
 
 
 AXIS_LABELS = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"}
-
-
-@dataclass
-class RenderedImage:
-    label: str
-    data_url: str
-    camera_metadata: Dict[str, Any]
 
 
 @dataclass
@@ -127,7 +119,7 @@ class DirectionInferenceAgent:
         self,
         selected_objects: Optional[Iterable[object]] = None,
     ) -> DirectionInferenceResult:
-        if bpy is None or Vector is None:
+        if bpy is None:
             raise RuntimeError("DirectionInferenceAgent must run inside Blender.")
 
         objects = self._resolve_objects(selected_objects)
@@ -138,7 +130,11 @@ class DirectionInferenceAgent:
         scene_info = parser.generate_scene_info(objects)
         armatures = self._find_armatures(objects)
         skeleton_images = self._render_skeleton_context(armatures)
-        mesh_renders = self.render_mesh_views(objects)
+        renderer = MeshRenderer(context=self.context)
+        mesh_renders = renderer.render_views_single_frame(
+            objects,
+            resolution=self.render_resolution,
+        )
 
         result = self._invoke_multimodal_model(
             scene_info=scene_info,
@@ -149,102 +145,6 @@ class DirectionInferenceAgent:
             image.camera_metadata for image in mesh_renders
         ]
         return result
-
-    def render_mesh_views(self, selected_objects: Sequence[object]) -> List[RenderedImage]:
-        render_objects = self._find_render_meshes(selected_objects)
-        if not render_objects:
-            return []
-
-        center, span = self._compute_bounds(render_objects)
-        distance = max(span * 2.75, 1.0)
-        ortho_scale = max(span * 1.35, 1.0)
-        view_specs = [
-            ("perspective", Vector((-distance, -distance, distance * 0.8)), False),
-            ("front", Vector((0.0, -distance, 0.0)), True),
-            ("back", Vector((0.0, distance, 0.0)), True),
-            ("left", Vector((-distance, 0.0, 0.0)), True),
-            ("right", Vector((distance, 0.0, 0.0)), True),
-            ("top", Vector((0.0, 0.0, distance)), True),
-        ]
-
-        scene = bpy.context.scene
-        original_camera = scene.camera
-        original_resolution = (
-            scene.render.resolution_x,
-            scene.render.resolution_y,
-            scene.render.film_transparent,
-        )
-        original_hide_render = {obj.name: obj.hide_render for obj in bpy.data.objects}
-        original_filepath = scene.render.filepath
-        camera = None
-        camera_data = None
-        light = None
-        light_data = None
-        renders: List[RenderedImage] = []
-
-        try:
-            camera_data = bpy.data.cameras.new("DirectionInferenceCamera")
-            camera = bpy.data.objects.new(
-                "DirectionInferenceCamera",
-                camera_data,
-            )
-            light_data = bpy.data.lights.new("DirectionInferenceLight", type="AREA")
-            light = bpy.data.objects.new(
-                "DirectionInferenceLight",
-                light_data,
-            )
-            bpy.context.collection.objects.link(camera)
-            bpy.context.collection.objects.link(light)
-            light.data.energy = 450.0
-            light.data.size = max(span * 1.5, 1.0)
-            light.location = center + Vector((distance * 0.25, -distance * 0.35, distance))
-            scene.camera = camera
-            scene.render.resolution_x = self.render_resolution
-            scene.render.resolution_y = self.render_resolution
-            scene.render.film_transparent = False
-
-            allowed = {obj.name for obj in render_objects}
-            allowed.update({camera.name, light.name})
-            for obj in bpy.data.objects:
-                obj.hide_render = obj.name not in allowed
-
-            with tempfile.TemporaryDirectory(prefix="direction_inference_") as temp_dir:
-                for label, offset, orthographic in view_specs:
-                    camera.location = center + offset
-                    self._look_at(camera, center)
-                    camera.data.type = "ORTHO" if orthographic else "PERSP"
-                    camera.data.ortho_scale = ortho_scale
-                    camera.data.lens = 70
-                    scene.render.filepath = os.path.join(temp_dir, f"{label}.png")
-                    bpy.ops.render.render(write_still=True)
-                    with open(scene.render.filepath, "rb") as handle:
-                        encoded = base64.b64encode(handle.read()).decode("ascii")
-                    renders.append(
-                        RenderedImage(
-                            label=label,
-                            data_url=f"data:image/png;base64,{encoded}",
-                            camera_metadata=self._camera_metadata(camera, label),
-                        )
-                    )
-        finally:
-            scene.camera = original_camera
-            scene.render.resolution_x = original_resolution[0]
-            scene.render.resolution_y = original_resolution[1]
-            scene.render.film_transparent = original_resolution[2]
-            scene.render.filepath = original_filepath
-            for obj in bpy.data.objects:
-                if obj.name in original_hide_render:
-                    obj.hide_render = original_hide_render[obj.name]
-            if camera is not None:
-                bpy.data.objects.remove(camera, do_unlink=True)
-            if camera_data is not None:
-                bpy.data.cameras.remove(camera_data, do_unlink=True)
-            if light is not None:
-                bpy.data.objects.remove(light, do_unlink=True)
-            if light_data is not None:
-                bpy.data.lights.remove(light_data, do_unlink=True)
-
-        return renders
 
     def _invoke_multimodal_model(
         self,
@@ -411,100 +311,8 @@ class DirectionInferenceAgent:
 
         return armatures
 
-    def _find_render_meshes(self, objects: Sequence[object]) -> List[object]:
-        meshes: List[object] = []
-        seen = set()
-
-        def add_mesh(obj):
-            if obj is not None and getattr(obj, "type", None) == "MESH" and obj.name not in seen:
-                meshes.append(obj)
-                seen.add(obj.name)
-
-        selected_names = {obj.name for obj in objects}
-        for obj in objects:
-            add_mesh(obj)
-            for child in getattr(obj, "children_recursive", []):
-                add_mesh(child)
-
-            if getattr(obj, "type", None) == "ARMATURE":
-                for candidate in bpy.data.objects:
-                    if getattr(candidate, "type", None) != "MESH":
-                        continue
-                    if getattr(candidate, "parent", None) == obj:
-                        add_mesh(candidate)
-                        continue
-                    for modifier in getattr(candidate, "modifiers", []):
-                        if (
-                            getattr(modifier, "type", None) == "ARMATURE"
-                            and getattr(modifier, "object", None) == obj
-                        ):
-                            add_mesh(candidate)
-                            break
-
-        if not meshes:
-            for obj in bpy.context.scene.objects:
-                if getattr(obj, "type", None) == "MESH" and getattr(obj, "parent", None):
-                    if obj.parent.name in selected_names:
-                        add_mesh(obj)
-
-        return meshes
-
-    def _compute_bounds(self, objects: Sequence[object]):
-        points = []
-        for obj in objects:
-            for corner in obj.bound_box:
-                points.append(obj.matrix_world @ Vector(corner))
-
-        if not points:
-            return Vector((0.0, 0.0, 0.0)), 1.0
-
-        min_corner = Vector(
-            (
-                min(point.x for point in points),
-                min(point.y for point in points),
-                min(point.z for point in points),
-            )
-        )
-        max_corner = Vector(
-            (
-                max(point.x for point in points),
-                max(point.y for point in points),
-                max(point.z for point in points),
-            )
-        )
-        center = (min_corner + max_corner) * 0.5
-        span_vector = max_corner - min_corner
-        span = max(span_vector.x, span_vector.y, span_vector.z, 1.0)
-        return center, float(span)
-
-    def _look_at(self, camera, target) -> None:
-        direction = target - camera.location
-        if direction.length < 1e-6:
-            direction = Vector((0.0, 0.0, -1.0))
-        camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
-
-    def _camera_metadata(self, camera, label: str) -> Dict[str, Any]:
-        rotation = camera.rotation_euler
-        world_quaternion = camera.matrix_world.to_quaternion()
-        return {
-            "render_label": label,
-            "location": self._vector_to_list(camera.location),
-            "rotation_euler": [float(rotation.x), float(rotation.y), float(rotation.z)],
-            "forward_direction": self._vector_to_list(world_quaternion @ Vector((0.0, 0.0, -1.0))),
-            "up_direction": self._vector_to_list(world_quaternion @ Vector((0.0, 1.0, 0.0))),
-            "right_direction": self._vector_to_list(world_quaternion @ Vector((1.0, 0.0, 0.0))),
-            "projection": camera.data.type,
-        }
-
-    def _vector_to_list(self, vector) -> List[float]:
-        return [round(float(vector.x), 6), round(float(vector.y), 6), round(float(vector.z), 6)]
-
     def _numpy_image_to_data_url(self, image: np.ndarray) -> str:
-        success, encoded = cv2.imencode(".png", image)
-        if not success:
-            raise ValueError("Failed to encode skeleton image as PNG.")
-        encoded_bytes = base64.b64encode(encoded.tobytes()).decode("ascii")
-        return f"data:image/png;base64,{encoded_bytes}"
+        return compress_image_for_llm(image)
 
     def _extract_response_text(self, content: Any) -> str:
         if isinstance(content, str):

@@ -441,6 +441,24 @@ class BlenderExecutor:
             armature.animation_data.action = self.bpy.data.actions.new(name=action_name)
 
     def _resolve_target(self, armature, track: AnimationTrack):
+        # Find the rig's root bone (bone with no parent)
+        root_bone = next(
+            (pose_bone for pose_bone in armature.pose.bones if pose_bone.parent is None),
+            None,
+        )
+
+        if root_bone is None:
+            raise RuntimeError(f"Armature `{armature.name}` has no root bone.")
+
+        # If this is a translation track targeting the root bone,
+        # move the armature object instead.
+        if (
+            track.channel == "location"
+            and track.target_name == root_bone.name
+        ):
+            return armature
+
+        # A path with no bone name also targets the armature.
         if "/" not in track.target_path:
             return armature
 
@@ -448,8 +466,10 @@ class BlenderExecutor:
         pose_bone = armature.pose.bones.get(bone_name)
         if pose_bone is None:
             raise KeyError(
-                f"Pose bone `{bone_name}` was not found on armature `{armature.name}` for track `{track.target_path}`."
+                f"Pose bone `{bone_name}` was not found on armature "
+                f"`{armature.name}` for track `{track.target_path}`."
             )
+
         return pose_bone
 
     def _apply_track(self, target, track: AnimationTrack, fps: float, frame_start: float) -> None:
@@ -478,9 +498,7 @@ class BlenderExecutor:
                 if root_bone is not None:
                     if Vector is None:
                         raise RuntimeError("mathutils.Vector is unavailable; run this inside Blender.")
-                    local_vec = Vector(keyframe.values)
-                    world_vec = root_bone.matrix.to_3x3() @ local_vec
-                    target.location = world_vec
+                    target.location = keyframe.values
                 else:
                     target.location = keyframe.values
                 target.keyframe_insert(
