@@ -1,4 +1,4 @@
-# Agentic_AI-Based_Framework_for_3D-Rigging_and_Animation
+# Agentic AI-Based Framework for 3D Rigging and Animation
 
 ## Overview
 
