@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     import bpy  # type: ignore
@@ -8,10 +9,12 @@ except ImportError:  # pragma: no cover - only available inside Blender
     bpy = None
 
 
-PREVIEW_SCENE_NAME = "AI_Preview"
+PREVIEW_COLLECTION_NAME = "AI_Preview"
 PREVIEW_ARMATURE_SUFFIX = "_AI_Preview"
 PREVIEW_ACTION_SUFFIX = "_AI_Preview_Action"
 PREVIEW_MARKER = "generator_preview_resource"
+_PENDING_SCENE_PROPS: Dict[int, Dict[str, Any]] = {}
+_SCENE_PROP_TIMER_REGISTERED = False
 
 
 def _require_bpy():
@@ -25,44 +28,212 @@ def _get_scene_prop(scene, name: str, default=""):
 
 
 def _set_scene_prop(scene, name: str, value) -> None:
-    if scene is not None and hasattr(scene, name):
-        setattr(scene, name, value)
+    if scene is None or not hasattr(scene, name):
+        return
+    _queue_scene_prop(scene, name, value)
+
+
+def _queue_scene_prop(scene, name: str, value) -> None:
+    global _SCENE_PROP_TIMER_REGISTERED
+
+    key = int(scene.as_pointer()) if hasattr(scene, "as_pointer") else id(scene)
+    record = _PENDING_SCENE_PROPS.setdefault(
+        key,
+        {
+            "scene": scene,
+            "values": {},
+            "attempts": 0,
+        },
+    )
+    record["values"][name] = value
+
+    if not _SCENE_PROP_TIMER_REGISTERED and bpy is not None:
+        _SCENE_PROP_TIMER_REGISTERED = True
+        bpy.app.timers.register(_flush_pending_scene_props, first_interval=0.0)
+
+
+def _flush_pending_scene_props():
+    global _SCENE_PROP_TIMER_REGISTERED
+
+    retry_needed = False
+    for key, record in list(_PENDING_SCENE_PROPS.items()):
+        scene = record.get("scene")
+        values = dict(record.get("values") or {})
+        try:
+            for name, value in values.items():
+                if scene is not None and hasattr(scene, name):
+                    setattr(scene, name, value)
+            _PENDING_SCENE_PROPS.pop(key, None)
+        except RuntimeError as error:
+            if "Writing to ID classes in this context is not allowed" not in str(error):
+                _PENDING_SCENE_PROPS.pop(key, None)
+                continue
+            record["attempts"] = int(record.get("attempts") or 0) + 1
+            if record["attempts"] <= 20:
+                retry_needed = True
+            else:
+                _PENDING_SCENE_PROPS.pop(key, None)
+        except ReferenceError:
+            _PENDING_SCENE_PROPS.pop(key, None)
+
+    if retry_needed and _PENDING_SCENE_PROPS:
+        return 0.1
+
+    _SCENE_PROP_TIMER_REGISTERED = False
+    return None
 
 
 def _clear_preview_properties(scene) -> None:
-    _set_scene_prop(scene, "preview_scene_name", "")
+    _set_scene_prop(scene, "preview_collection_name", "")
     _set_scene_prop(scene, "preview_armature_name", "")
     _set_scene_prop(scene, "preview_action_name", "")
     _set_scene_prop(scene, "preview_original_armature_name", "")
     _set_scene_prop(scene, "preview_active", False)
 
 
-def _copy_scene_timing(source_scene, target_scene) -> None:
-    if source_scene is None or target_scene is None:
-        return
+def _sync_preview_properties(
+    scene,
+    preview_collection=None,
+    preview_armature=None,
+    preview_action=None,
+    original_armature=None,
+) -> None:
+    _set_scene_prop(scene, "preview_collection_name", getattr(preview_collection, "name", ""))
+    _set_scene_prop(scene, "preview_armature_name", getattr(preview_armature, "name", ""))
+    _set_scene_prop(scene, "preview_action_name", getattr(preview_action, "name", ""))
+    _set_scene_prop(scene, "preview_original_armature_name", getattr(original_armature, "name", ""))
+    _set_scene_prop(scene, "preview_active", preview_armature is not None)
 
-    target_scene.frame_start = source_scene.frame_start
-    target_scene.frame_end = source_scene.frame_end
-    target_scene.frame_current = source_scene.frame_current
-    target_scene.render.fps = source_scene.render.fps
-    target_scene.render.fps_base = source_scene.render.fps_base
+
+@dataclass
+class PreviewSession:
+    owner_scene: object | None = None
+    preview_collection: object | None = None
+    preview_armature: object | None = None
+    preview_action: object | None = None
+    original_armature: object | None = None
+    viewport_window: object | None = None
+    viewport_area: object | None = None
+    viewport_region: object | None = None
+    preview_meshes: List[object] = field(default_factory=list)
+
+    def capture_viewport(self, context) -> None:
+        print("[Preview] Capturing active viewport")
+        self.viewport_window = getattr(context, "window", None)
+        self.viewport_area = getattr(context, "area", None)
+        self.viewport_region = _active_window_region(self.viewport_area)
+
+        if getattr(self.viewport_area, "type", None) != "VIEW_3D":
+            fallback = _find_existing_view3d(context)
+            if fallback is not None:
+                self.viewport_window, self.viewport_area, self.viewport_region = fallback
+
+    def resolve_viewport(self, context) -> Optional[Tuple[object, object, object]]:
+        if _viewport_is_valid(self.viewport_window, self.viewport_area, self.viewport_region):
+            return self.viewport_window, self.viewport_area, self.viewport_region
+
+        print("[Preview] Stored viewport is unavailable; falling back to an existing VIEW_3D")
+        fallback = _find_existing_view3d(context)
+        if fallback is None:
+            return None
+
+        self.viewport_window, self.viewport_area, self.viewport_region = fallback
+        return fallback
+
+    def has_preview(self) -> bool:
+        return (
+            self.preview_collection is not None
+            and self.preview_armature is not None
+            and getattr(self.preview_armature, "type", None) == "ARMATURE"
+        )
+
+    def state_dict(self) -> Dict[str, str]:
+        return {
+            "preview_collection_name": getattr(self.preview_collection, "name", ""),
+            "preview_armature_name": getattr(self.preview_armature, "name", ""),
+            "preview_action_name": getattr(self.preview_action, "name", ""),
+        }
+
+    def reset(self) -> None:
+        self.owner_scene = None
+        self.preview_collection = None
+        self.preview_armature = None
+        self.preview_action = None
+        self.original_armature = None
+        self.viewport_window = None
+        self.viewport_area = None
+        self.viewport_region = None
+        self.preview_meshes = []
 
 
-def ensure_preview_scene(original_scene=None):
+_PREVIEW_SESSION = PreviewSession()
+
+
+def get_preview_session() -> PreviewSession:
+    return _PREVIEW_SESSION
+
+
+def _active_window_region(area):
+    if area is None:
+        return None
+    return next((item for item in area.regions if item.type == "WINDOW"), None)
+
+
+def _viewport_is_valid(window, area, region) -> bool:
+    if window is None or area is None or region is None:
+        return False
+    screen = getattr(window, "screen", None)
+    return (
+        screen is not None
+        and any(candidate is area for candidate in screen.areas)
+        and getattr(area, "type", None) == "VIEW_3D"
+    )
+
+
+def _find_existing_view3d(context) -> Optional[Tuple[object, object, object]]:
+    window_manager = getattr(context, "window_manager", None)
+    if window_manager is None:
+        return None
+
+    for window in window_manager.windows:
+        screen = getattr(window, "screen", None)
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            region = _active_window_region(area)
+            if region is not None:
+                return window, area, region
+    return None
+
+
+def ensure_preview_collection(owner_scene=None):
     bpy_module = _require_bpy()
-    preview_scene = bpy_module.data.scenes.get(PREVIEW_SCENE_NAME)
-    if preview_scene is None:
-        print("[Preview] Creating preview scene")
-        preview_scene = bpy_module.data.scenes.new(PREVIEW_SCENE_NAME)
+    owner_scene = owner_scene or bpy_module.context.scene
+    if owner_scene is None:
+        raise ValueError("A scene is required to create the preview collection.")
+
+    preview_collection = bpy_module.data.collections.get(PREVIEW_COLLECTION_NAME)
+    if preview_collection is None:
+        print("[Preview] Creating preview collection")
+        preview_collection = bpy_module.data.collections.new(PREVIEW_COLLECTION_NAME)
+        preview_collection[PREVIEW_MARKER] = True
     else:
-        print("[Preview] Reusing preview scene")
+        print("[Preview] Reusing preview collection")
 
-    _copy_scene_timing(original_scene, preview_scene)
-    return preview_scene
+    if not _collection_is_child(owner_scene.collection, preview_collection):
+        owner_scene.collection.children.link(preview_collection)
+
+    return preview_collection
 
 
-def _iter_preview_objects(preview_scene):
-    for obj in list(getattr(preview_scene, "objects", [])):
+def _collection_is_child(parent_collection, child_collection) -> bool:
+    return any(collection is child_collection for collection in parent_collection.children)
+
+
+def _iter_preview_objects(preview_collection):
+    for obj in list(getattr(preview_collection, "objects", [])):
         if obj.get(PREVIEW_MARKER) or PREVIEW_ARMATURE_SUFFIX in obj.name:
             yield obj
 
@@ -87,43 +258,69 @@ def _remove_action(action_name: str) -> None:
         bpy.data.actions.remove(action)
 
 
-def cleanup_preview_resources(owner_scene=None, remove_scene: bool = False, original_scene=None) -> None:
+def _unlink_collection_from_scene(scene, collection) -> None:
+    if scene is None or collection is None:
+        return
+
+    try:
+        if _collection_is_child(scene.collection, collection):
+            scene.collection.children.unlink(collection)
+    except RuntimeError:
+        pass
+
+
+def cleanup_preview_collection(owner_scene=None, remove_collection: bool = True) -> None:
     bpy_module = _require_bpy()
-    print("[Preview] Removing preview resources")
+    session = get_preview_session()
+    owner_scene = owner_scene or session.owner_scene or bpy_module.context.scene
+    preview_collection = session.preview_collection or bpy_module.data.collections.get(
+        _get_scene_prop(owner_scene, "preview_collection_name", "") or PREVIEW_COLLECTION_NAME
+    )
+    preview_armature = session.preview_armature
+    preview_action_name = getattr(session.preview_action, "name", "")
 
-    preview_scene_name = _get_scene_prop(owner_scene, "preview_scene_name", PREVIEW_SCENE_NAME) or PREVIEW_SCENE_NAME
-    preview_scene = bpy_module.data.scenes.get(preview_scene_name)
-    preview_armature_name = _get_scene_prop(owner_scene, "preview_armature_name", "")
-    preview_action_name = _get_scene_prop(owner_scene, "preview_action_name", "")
+    print("[Preview] Cleaning preview collection")
 
-    if preview_scene is not None:
-        print("[Preview] Cleaning preview scene")
-        objects_to_remove = list(_iter_preview_objects(preview_scene))
-        if preview_armature_name:
-            preview_armature = bpy_module.data.objects.get(preview_armature_name)
-            if preview_armature is not None and preview_armature not in objects_to_remove:
-                objects_to_remove.append(preview_armature)
+    objects_to_remove = []
+    if preview_collection is not None:
+        objects_to_remove.extend(_iter_preview_objects(preview_collection))
+    if preview_armature is not None and preview_armature not in objects_to_remove:
+        objects_to_remove.append(preview_armature)
 
-        for obj in objects_to_remove:
-            action = getattr(getattr(obj, "animation_data", None), "action", None)
-            data = getattr(obj, "data", None)
-            bpy_module.data.objects.remove(obj, do_unlink=True)
-            _remove_data_block(data)
-            if action is not None and action.users == 0:
-                bpy_module.data.actions.remove(action)
+    for obj in objects_to_remove:
+        action = getattr(getattr(obj, "animation_data", None), "action", None)
+        data = getattr(obj, "data", None)
+        bpy_module.data.objects.remove(obj, do_unlink=True)
+        _remove_data_block(data)
+        if action is session.preview_action:
+            continue
+        if action is not None and action.users == 0:
+            bpy_module.data.actions.remove(action)
 
-    _remove_action(preview_action_name)
+    preview_action = bpy_module.data.actions.get(preview_action_name)
+    if preview_action is not None and preview_action is not session.preview_action and preview_action.users == 0:
+        bpy_module.data.actions.remove(preview_action)
 
     for action in list(bpy_module.data.actions):
+        if action is session.preview_action:
+            continue
         if action.get(PREVIEW_MARKER):
             bpy_module.data.actions.remove(action)
 
-    if remove_scene and preview_scene is not None:
-        _restore_windows_from_preview(preview_scene, original_scene)
-        if len(preview_scene.objects) == 0:
-            bpy_module.data.scenes.remove(preview_scene)
+    if remove_collection and preview_collection is not None:
+        _unlink_collection_from_scene(owner_scene, preview_collection)
+        if len(preview_collection.objects) == 0:
+            bpy_module.data.collections.remove(preview_collection)
 
+
+def cleanup_preview_resources(owner_scene=None, remove_scene: bool = False, original_scene=None) -> None:
+    _require_bpy()
+    session = get_preview_session()
+    owner_scene = owner_scene or original_scene or session.owner_scene
+    print("[Preview] Removing preview resources")
+    cleanup_preview_collection(owner_scene, remove_collection=True)
     _clear_preview_properties(owner_scene)
+    session.reset()
     print("[Preview] Cleanup complete")
 
 
@@ -148,6 +345,7 @@ def _make_preview_action(original_armature, preview_armature):
         action = bpy.data.actions.new(name=f"{preview_armature.name}{PREVIEW_ACTION_SUFFIX}")
 
     action[PREVIEW_MARKER] = True
+    action.use_fake_user = True
     preview_armature.animation_data_create()
     preview_armature.animation_data.action = action
     return action
@@ -271,7 +469,7 @@ def _restore_preview_parenting(original_mesh, preview_mesh, preview_armature, me
         preview_mesh.matrix_parent_inverse = original_mesh.matrix_parent_inverse.copy()
 
 
-def _copy_character_to_preview(original_armature, preview_armature, preview_scene, original_scene=None) -> List[object]:
+def _copy_character_to_preview(original_armature, preview_armature, preview_collection, original_scene=None) -> List[object]:
     linked_meshes = _find_linked_meshes(original_armature, original_scene)
     preview_meshes = []
     mesh_map: Dict[object, object] = {}
@@ -282,10 +480,11 @@ def _copy_character_to_preview(original_armature, preview_armature, preview_scen
         mesh_map[original_mesh] = preview_mesh
         preview_meshes.append(preview_mesh)
 
+    print("[Preview] Linking preview objects")
     for original_mesh, preview_mesh in mesh_map.items():
         _restore_preview_parenting(original_mesh, preview_mesh, preview_armature, mesh_map)
         print("[Preview] Linking preview mesh")
-        preview_scene.collection.objects.link(preview_mesh)
+        preview_collection.objects.link(preview_mesh)
 
     print("[Preview] Preview character ready")
     return preview_meshes
@@ -293,6 +492,7 @@ def _copy_character_to_preview(original_armature, preview_armature, preview_scen
 
 def prepare_preview(context, original_armature, owner_scene=None):
     bpy_module = _require_bpy()
+    session = get_preview_session()
     if original_armature is None:
         raise ValueError("No armature was provided for preview generation.")
     if isinstance(original_armature, str):
@@ -303,9 +503,11 @@ def prepare_preview(context, original_armature, owner_scene=None):
         raise TypeError(f"Object `{original_armature.name}` is not an armature.")
 
     owner_scene = owner_scene or context.scene
-    preview_scene = ensure_preview_scene(owner_scene)
     cleanup_preview_resources(owner_scene, remove_scene=False, original_scene=owner_scene)
-    preview_scene = ensure_preview_scene(owner_scene)
+    session.owner_scene = owner_scene
+    session.original_armature = original_armature
+    session.capture_viewport(context)
+    preview_collection = ensure_preview_collection(owner_scene)
 
     print("[Preview] Duplicating armature")
     preview_armature = original_armature.copy()
@@ -317,141 +519,109 @@ def prepare_preview(context, original_armature, owner_scene=None):
     preview_armature.matrix_world = original_armature.matrix_world.copy()
     preview_armature.animation_data_clear()
 
-    preview_scene.collection.objects.link(preview_armature)
+    preview_collection.objects.link(preview_armature)
     preview_action = _make_preview_action(original_armature, preview_armature)
-    _copy_character_to_preview(original_armature, preview_armature, preview_scene, owner_scene)
+    session.preview_action = preview_action
+    preview_action.use_fake_user = True
+    preview_meshes = _copy_character_to_preview(
+        original_armature,
+        preview_armature,
+        preview_collection,
+        owner_scene,
+    )
 
-    _set_scene_prop(owner_scene, "preview_scene_name", preview_scene.name)
-    _set_scene_prop(owner_scene, "preview_armature_name", preview_armature.name)
-    _set_scene_prop(owner_scene, "preview_action_name", preview_action.name)
-    _set_scene_prop(owner_scene, "preview_original_armature_name", original_armature.name)
-    _set_scene_prop(owner_scene, "preview_active", True)
-
-    ensure_preview_viewport(context, preview_scene, owner_scene)
+    session.preview_collection = preview_collection
+    session.preview_armature = preview_armature
+    session.preview_meshes = preview_meshes
+    _sync_preview_properties(
+        owner_scene,
+        preview_collection=preview_collection,
+        preview_armature=preview_armature,
+        preview_action=preview_action,
+        original_armature=original_armature,
+    )
+    _tag_preview_viewport_redraw(context)
 
     print("[Preview] Preview armature ready")
-    return {
-        "preview_scene_name": preview_scene.name,
-        "preview_armature_name": preview_armature.name,
-        "preview_action_name": preview_action.name,
-    }
+    return session.state_dict()
 
 
-def preview_exists(scene) -> bool:
-    bpy_module = _require_bpy()
-    if not _get_scene_prop(scene, "preview_active", False):
-        return False
+def preview_exists(scene=None) -> bool:
+    session = get_preview_session()
+    if session.has_preview():
+        return True
 
-    preview_scene = bpy_module.data.scenes.get(_get_scene_prop(scene, "preview_scene_name", ""))
-    preview_armature = bpy_module.data.objects.get(_get_scene_prop(scene, "preview_armature_name", ""))
-    if preview_scene is None or preview_armature is None:
+    if scene is not None:
         _clear_preview_properties(scene)
-        return False
-
-    return getattr(preview_armature, "type", None) == "ARMATURE"
+    return False
 
 
-def _view3d_areas(screen):
-    return [area for area in screen.areas if area.type == "VIEW_3D"]
-
-
-def _space_uses_scene(space, scene) -> bool:
-    return hasattr(space, "scene") and getattr(space, "scene", None) == scene
-
-
-def _bind_scene_to_area(window, area, preview_scene) -> None:
-    print("[Preview] Binding preview scene")
-    space = getattr(area.spaces, "active", None)
-    if space is not None and hasattr(space, "scene"):
-        space.scene = preview_scene
+def _tag_preview_viewport_redraw(context) -> None:
+    session = get_preview_session()
+    resolved = session.resolve_viewport(context)
+    if resolved is None:
         return
 
-    if hasattr(window, "scene"):
-        window.scene = preview_scene
+    _window, area, _region = resolved
+    try:
+        area.tag_redraw()
+    except Exception:
+        pass
 
 
-def _find_preview_viewport(context, preview_scene) -> Optional[Tuple[object, object]]:
-    print("[Preview] Searching for preview viewport")
-    window_manager = getattr(context, "window_manager", None)
-    if window_manager is None:
+def get_preview_armature():
+    return get_preview_session().preview_armature
+
+
+def get_preview_action():
+    return get_preview_session().preview_action
+
+
+def refresh_preview_action(owner_scene=None):
+    session = get_preview_session()
+    if session.preview_armature is None:
         return None
 
-    for window in window_manager.windows:
-        screen = getattr(window, "screen", None)
-        if screen is None:
+    session.preview_action = getattr(
+        getattr(session.preview_armature, "animation_data", None),
+        "action",
+        None,
+    )
+    if session.preview_action is not None:
+        session.preview_action.use_fake_user = True
+    _set_scene_prop(owner_scene or session.owner_scene, "preview_action_name", getattr(session.preview_action, "name", ""))
+    return session.preview_action
+
+
+def _assign_first_action_slot(animation_data, action) -> None:
+    slots = getattr(action, "slots", None)
+    if slots is None or not hasattr(animation_data, "action_slot"):
+        return
+
+    try:
+        slot_count = len(slots)
+    except TypeError:
+        return
+    if slot_count == 0:
+        return
+
+    for slot in slots:
+        try:
+            animation_data.action_slot = slot
+            print("[Accept] Assigned action slot:", getattr(slot, "name", slot))
+            return
+        except Exception:
             continue
-        for area in _view3d_areas(screen):
-            space = getattr(area.spaces, "active", None)
-            if space is not None and _space_uses_scene(space, preview_scene):
-                print("[Preview] Reusing preview viewport")
-                return window, area
-
-        if screen.get("generator_preview_viewport_created"):
-            viewports = _view3d_areas(screen)
-            if len(viewports) > 1:
-                print("[Preview] Reusing preview viewport")
-                return window, viewports[-1]
-
-    return None
-
-
-def _split_viewport(context):
-    window = context.window
-    screen = context.screen
-    viewports = _view3d_areas(screen)
-    if not viewports:
-        return None
-
-    if len(viewports) > 1 or screen.get("generator_preview_viewport_created"):
-        return window, viewports[-1]
-
-    print("[Preview] Creating preview viewport")
-    area = viewports[0]
-    region = next((item for item in area.regions if item.type == "WINDOW"), None)
-    with context.temp_override(window=window, screen=screen, area=area, region=region):
-        bpy.ops.screen.area_split(direction="VERTICAL", factor=0.5)
-
-    screen["generator_preview_viewport_created"] = True
-    viewports = _view3d_areas(screen)
-    return window, viewports[-1] if viewports else area
-
-
-def ensure_preview_viewport(context, preview_scene, original_scene=None) -> None:
-    found = _find_preview_viewport(context, preview_scene)
-    if found is None:
-        found = _split_viewport(context)
-
-    if found is None:
-        return
-
-    window, area = found
-    _bind_scene_to_area(window, area, preview_scene)
-
-
-def _restore_windows_from_preview(preview_scene, original_scene=None) -> None:
-    window_manager = getattr(bpy.context, "window_manager", None)
-    if window_manager is None:
-        return
-
-    replacement_scene = original_scene
-    if replacement_scene is None:
-        replacement_scene = next((scene for scene in bpy.data.scenes if scene != preview_scene), None)
-
-    if replacement_scene is None:
-        return
-
-    for window in window_manager.windows:
-        if getattr(window, "scene", None) == preview_scene:
-            window.scene = replacement_scene
 
 
 def accept_preview(context, owner_scene=None):
     bpy_module = _require_bpy()
-    owner_scene = owner_scene or context.scene
+    session = get_preview_session()
+    owner_scene = owner_scene or session.owner_scene or context.scene
 
     print("[Preview] Accepting preview")
-    preview_armature = bpy_module.data.objects.get(_get_scene_prop(owner_scene, "preview_armature_name", ""))
-    original_armature = bpy_module.data.objects.get(_get_scene_prop(owner_scene, "preview_original_armature_name", ""))
+    preview_armature = session.preview_armature
+    original_armature = session.original_armature
 
     if preview_armature is None:
         raise ValueError("Preview armature is missing.")
@@ -460,25 +630,57 @@ def accept_preview(context, owner_scene=None):
     if getattr(original_armature, "type", None) != "ARMATURE":
         raise TypeError(f"Object `{original_armature.name}` is not an armature.")
 
-    preview_action = getattr(getattr(preview_armature, "animation_data", None), "action", None)
+    assert session.preview_action is not None
+    preview_action = session.preview_action
     if preview_action is None:
-        raise ValueError("Preview armature has no animation action to accept.")
+        raise ValueError("Preview session has no animation action to accept.")
 
-    print("[Preview] Copying action")
+    print(
+        "[Preview] Accept action: "
+        f"name={getattr(preview_action, 'name', '')}, "
+        f"users={getattr(preview_action, 'users', 0)}, "
+        f"preview_marker={bool(preview_action.get(PREVIEW_MARKER))}"
+    )
+
+    print("[Preview] Assigning accepted preview action")
     accepted_action = preview_action.copy()
+    assert accepted_action is not None
+    assert isinstance(accepted_action, bpy_module.types.Action)
+    assert accepted_action.users >= 0
+
     accepted_action.name = f"{original_armature.name}_Accepted_Preview"
     if accepted_action.get(PREVIEW_MARKER):
         del accepted_action[PREVIEW_MARKER]
+    accepted_action.use_fake_user = True
+    session.preview_action = accepted_action
+    print("[Accept] Copied action f-curves:", len(getattr(accepted_action, "fcurves", [])))
 
-    original_armature.animation_data_create()
-    original_armature.animation_data.action = accepted_action
+    if original_armature.animation_data is None:
+        original_armature.animation_data_create()
+
+    ad = original_armature.animation_data
+    ad.use_nla = False
+    ad.use_tweak_mode = False
+    ad.action = None
+    bpy.context.view_layer.update()
+    ad.action = accepted_action
+    _assign_first_action_slot(ad, accepted_action)
+    bpy.context.view_layer.update()
+
+    print("[Accept] Assigned action:", original_armature.animation_data.action)
+    print("[Accept] Action name:", getattr(original_armature.animation_data.action, "name", None))
 
     cleanup_preview_resources(owner_scene, remove_scene=True, original_scene=owner_scene)
+    accepted_action.use_fake_user = False
+    if original_armature.animation_data is None or original_armature.animation_data.action is not accepted_action:
+        raise RuntimeError("Accepted preview action was not retained on the original armature after cleanup.")
     print("[Preview] Preview accepted")
     return accepted_action
 
 
 def cancel_preview(context, owner_scene=None) -> None:
-    owner_scene = owner_scene or context.scene
+    session = get_preview_session()
+    owner_scene = owner_scene or session.owner_scene or context.scene
     print("[Preview] Canceling preview")
     cleanup_preview_resources(owner_scene, remove_scene=True, original_scene=owner_scene)
+    print("[Preview] Preview cancelled")

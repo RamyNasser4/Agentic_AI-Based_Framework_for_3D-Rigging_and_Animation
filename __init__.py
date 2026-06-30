@@ -32,6 +32,18 @@ _AXIS_ENUM_ITEMS = (
     ("-Z", "-Z", ""),
 )
 _AXIS_VALUES = {item[0] for item in _AXIS_ENUM_ITEMS}
+_EXECUTION_MODE_ITEMS = (
+    (
+        "REFINEMENT",
+        "Refinement",
+        "Use planner, keyframe generation, execution, critic, and refinement iterations",
+    ),
+    (
+        "DIRECT",
+        "Direct (No Refinement)",
+        "Use planner, keyframe generation, and execution without critic/refinement iterations",
+    ),
+)
 
 
 def dropdown_items(self, context):
@@ -171,6 +183,10 @@ def _set_status(job_state, status, animate=False):
     job_state["status"] = status
     job_state["status_base"] = status if animate else ""
     job_state["status_dots"] = 0
+
+
+def _is_refinement_job(job_state):
+    return job_state.get("mode") == "REFINEMENT"
 
 
 def _animate_waiting_status(scene, job_state):
@@ -473,16 +489,33 @@ def _refinement_worker(
 
 
 def _execute_generation_step(scene, job_state, item):
+    from . import preview_manager
+
     index = item["index"]
     step = item["step"]
     response = item["response"]
+    preview_armature = preview_manager.get_preview_armature()
+    preview_armature_name = (
+        getattr(preview_armature, "name", "")
+        or job_state.get("preview_armature_name")
+        or job_state["object_name"]
+    )
 
     _set_status(job_state, f"Executing Step {index}")
     _refresh_scene_output(scene, job_state)
 
     try:
         print(f"[Generator] Stage 5.{index}: Executing keyframes in Blender.")
-        job_state["executor"].execute_from_text(response)
+        print(f"[Preview] Executing direct generation on preview armature `{preview_armature_name}`.")
+        job_state["executor"].execute_from_text(
+            response,
+            armature_name=preview_armature_name,
+            clear_existing_action=index == 1,
+        )
+        preview_action = preview_manager.refresh_preview_action(scene)
+        if preview_action is not None:
+            job_state["preview_action_name"] = preview_action.name
+            print(f"[Preview] Preview action updated to `{preview_action.name}`.")
         print(f"[Generator] Blender execution completed for step {index}.")
         job_state["all_outputs"].append(response)
         job_state["previous_animation"] = "\n".join(
@@ -519,11 +552,17 @@ def _execute_generation_step(scene, job_state, item):
 
 
 def _execute_refinement_iteration(scene, job_state, item):
+    from . import preview_manager
     from .skeleton_recorder import extract_skeleton_frames
 
     iteration = item["iteration"]
     keyframes = item["keyframes"]
-    preview_armature_name = job_state.get("preview_armature_name") or job_state["object_name"]
+    preview_armature = preview_manager.get_preview_armature()
+    preview_armature_name = (
+        getattr(preview_armature, "name", "")
+        or job_state.get("preview_armature_name")
+        or job_state["object_name"]
+    )
 
     job_state["current_step"] = iteration
     job_state["current_instruction"] = f"Iteration {iteration}"
@@ -539,11 +578,9 @@ def _execute_refinement_iteration(scene, job_state, item):
             armature_name=preview_armature_name,
             clear_existing_action=True,
         )
-        preview_armature = bpy.data.objects.get(preview_armature_name)
-        preview_action = getattr(getattr(preview_armature, "animation_data", None), "action", None)
+        preview_action = preview_manager.refresh_preview_action(scene)
         if preview_action is not None:
             job_state["preview_action_name"] = preview_action.name
-            scene.preview_action_name = preview_action.name
             print(f"[Preview] Preview action updated to `{preview_action.name}`.")
         print(f"[Generator] Refinement Blender execution completed for iteration {iteration}.")
         job_state["final_animation"] = keyframes
@@ -561,7 +598,7 @@ def _execute_refinement_iteration(scene, job_state, item):
             prompt=job_state.get("user_prompt", ""),
             armature_name=preview_armature_name,
             skeleton_frames=skeleton_frames,
-            scene=bpy.data.scenes.get(job_state.get("preview_scene_name") or "") or bpy.context.scene,
+            scene=scene,
         )
 
         job_state["request_queue"].put(
@@ -684,7 +721,7 @@ def _handle_generation_queue(scene):
             return _TIMER_INTERVAL
 
         if (
-            job_state.get("mode") != "refinement"
+            not _is_refinement_job(job_state)
             and job_state["plan_ready"]
             and job_state["current_step"] < job_state["total_steps"]
         ):
@@ -694,8 +731,12 @@ def _handle_generation_queue(scene):
         return _TIMER_INTERVAL
 
     item_type = item["type"]
+    if item_type.startswith("refinement_") and not _is_refinement_job(job_state):
+        print(f"[Generator] Ignoring refinement queue event `{item_type}` for direct generation job.")
+        return _TIMER_INTERVAL
 
     if item_type == "plan":
+        job_state["waiting_for_llm"] = False
         job_state["plan_text"] = item["plan"]
         job_state["steps"] = item["steps"]
         job_state["total_steps"] = len(item["steps"])
@@ -1110,6 +1151,9 @@ class GENERATOR_OT_generate(bpy.types.Operator):
 
         scene = context.scene
         user_prompt = scene.gen_prompt
+        execution_mode = getattr(scene, "gen_execution_mode", "REFINEMENT")
+        if execution_mode not in {"REFINEMENT", "DIRECT"}:
+            execution_mode = "REFINEMENT"
 
         if user_prompt == "Write your prompt here...":
             self.report({"WARNING"}, "Please enter a real prompt")
@@ -1175,11 +1219,14 @@ class GENERATOR_OT_generate(bpy.types.Operator):
         direction_settings = _direction_settings_from_scene(scene)
 
         print(f"[Generator] Starting pipeline for object `{object_name}`.")
+        print(f"[Generator] Execution mode: {execution_mode}.")
         print(f"[Generator] Prompt: {user_prompt}")
 
         parser = SceneParser(precision=1)
 
         try:
+            scene.gen_output = "Status: Parsing scene"
+            _tag_redraw()
             print("[Generator] Stage 1: Parsing initial scene state on main thread.")
             object_json = parser.generate_object_json([object_name])
             object_json = _append_direction_context(object_json, direction_settings)
@@ -1208,25 +1255,44 @@ class GENERATOR_OT_generate(bpy.types.Operator):
 
         request_queue = queue.Queue()
         result_queue = queue.Queue()
-        worker_thread = threading.Thread(
-            target=_refinement_worker,
-            args=(
+        if execution_mode == "REFINEMENT":
+            worker_target = _refinement_worker
+            worker_args = (
                 request_queue,
                 result_queue,
                 object_name,
                 object_json,
                 user_prompt,
                 preview_state["preview_armature_name"],
-            ),
-            name="GradRefinementWorker",
+            )
+            worker_name = "GradRefinementWorker"
+            initial_total_steps = 4
+            initial_waiting_for_llm = False
+        else:
+            worker_target = _generation_worker
+            worker_args = (
+                request_queue,
+                result_queue,
+                object_name,
+                object_json,
+                user_prompt,
+            )
+            worker_name = "GradDirectGenerationWorker"
+            initial_total_steps = 0
+            initial_waiting_for_llm = True
+
+        worker_thread = threading.Thread(
+            target=worker_target,
+            args=worker_args,
+            name=worker_name,
             daemon=True,
         )
 
         job_state = {
             "scene": scene,
-            "mode": "refinement",
+            "mode": execution_mode,
             "object_name": object_name,
-            "preview_scene_name": preview_state["preview_scene_name"],
+            "preview_collection_name": preview_state["preview_collection_name"],
             "preview_armature_name": preview_state["preview_armature_name"],
             "preview_action_name": preview_state["preview_action_name"],
             "preview_ready": True,
@@ -1239,12 +1305,12 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             "executor": BlenderExecutor(),
             "steps": [],
             "current_step": 0,
-            "total_steps": 4,
+            "total_steps": initial_total_steps,
             "current_instruction": "",
             "status": "Generating plan",
-            "status_base": "",
+            "status_base": "Generating plan" if initial_waiting_for_llm else "",
             "status_dots": 0,
-            "waiting_for_llm": False,
+            "waiting_for_llm": initial_waiting_for_llm,
             "previous_animation": None,
             "plan_history": [],
             "all_outputs": [],
@@ -1347,6 +1413,7 @@ class GENERATOR_PT_panel(bpy.types.Panel):
         box = layout.box()
         box.label(text="Prompt", icon="TEXT")
         box.prop(scene, "gen_prompt", text="")
+        box.prop(scene, "gen_execution_mode")
         box.prop(scene, "gen_mode")
 
         direction_box = layout.box()
@@ -1440,6 +1507,13 @@ def register():
         items=dropdown_items,
     )
 
+    bpy.types.Scene.gen_execution_mode = bpy.props.EnumProperty(
+        name="Execution Mode",
+        description="Choose whether to refine generated motion or run the direct generation pipeline",
+        items=_EXECUTION_MODE_ITEMS,
+        default="REFINEMENT",
+    )
+
     bpy.types.Scene.gen_auto_infer_directions = bpy.props.BoolProperty(
         name="Automatically Infer Directions",
         description="Use the vision direction helper to populate the direction controls",
@@ -1501,9 +1575,9 @@ def register():
         default=False,
     )
 
-    bpy.types.Scene.preview_scene_name = bpy.props.StringProperty(
-        name="Preview Scene",
-        description="Name of the active AI preview scene",
+    bpy.types.Scene.preview_collection_name = bpy.props.StringProperty(
+        name="Preview Collection",
+        description="Name of the active AI preview collection",
         default="",
     )
 
@@ -1537,7 +1611,7 @@ def unregister():
     del bpy.types.Scene.preview_original_armature_name
     del bpy.types.Scene.preview_action_name
     del bpy.types.Scene.preview_armature_name
-    del bpy.types.Scene.preview_scene_name
+    del bpy.types.Scene.preview_collection_name
     del bpy.types.Scene.gen_direction_inferred_object_name
     del bpy.types.Scene.gen_direction_inference_ready
     del bpy.types.Scene.gen_direction_error
@@ -1546,6 +1620,7 @@ def unregister():
     del bpy.types.Scene.gen_forward_axis
     del bpy.types.Scene.gen_auto_infer_directions
     del bpy.types.Scene.gen_prompt
+    del bpy.types.Scene.gen_execution_mode
     del bpy.types.Scene.gen_mode
     del bpy.types.Scene.gen_output
     del bpy.types.Scene.gen_loading
