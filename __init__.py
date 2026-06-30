@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import queue
 import re
@@ -9,7 +10,6 @@ import traceback
 import bpy  # type: ignore
 
 from .Blender_Executer import BlenderExecutor
-from .planner_agent import run_llm
 
 bl_info = {
     "name": "Generator Panel",
@@ -22,15 +22,48 @@ bl_info = {
 
 _GENERATION_JOBS = {}
 _GENERATION_JOBS_LOCK = threading.Lock()
+_PROMPT_REFINEMENT_JOBS = {}
+_PROMPT_REFINEMENT_JOBS_LOCK = threading.Lock()
 _TIMER_INTERVAL = 0.1
+MAX_PROMPT_REFINEMENT_QUESTIONS = 10
+_AXIS_ENUM_ITEMS = (
+    ("+X", "+X", ""),
+    ("-X", "-X", ""),
+    ("+Y", "+Y", ""),
+    ("-Y", "-Y", ""),
+    ("+Z", "+Z", ""),
+    ("-Z", "-Z", ""),
+)
+_AXIS_VALUES = {item[0] for item in _AXIS_ENUM_ITEMS}
+_EXECUTION_MODE_ITEMS = (
+    (
+        "REFINEMENT",
+        "Refinement",
+        "Use planner, keyframe generation, execution, critic, and refinement iterations",
+    ),
+    (
+        "DIRECT",
+        "Direct (No Refinement)",
+        "Use planner, keyframe generation, and execution without critic/refinement iterations",
+    ),
+)
 
 
 def dropdown_items(self, context):
+    scene = context.scene
+    action_mode = getattr(scene, "gen_action_mode", "ANIMATE")
+    wanted_type = "MESH" if action_mode == "RIG" else "ARMATURE"
+
     items = []
 
     for obj in context.scene.objects:
-        if obj.type == "ARMATURE":
+        if obj.type == wanted_type:
             items.append((obj.name, obj.name, ""))
+
+    if not items:
+        if wanted_type == "MESH":
+            return [("__NONE__", "No mesh objects found", "")]
+        return [("__NONE__", "No armatures found", "")]
 
     return items
 
@@ -42,7 +75,10 @@ def split_animation_plan(plan_text):
 
     grouped_steps = []
     current_step = []
-    step_header = re.compile(r"^(?:step\s*\d+\s*:|\d+[\.\)])\s*", re.IGNORECASE)
+    step_header = re.compile(
+        r"^(?:\[generator\]\s*plan\s*step\s*\d+\s*:|step\s*\d+\s*:|\d+[\.\)])\s*",
+        re.IGNORECASE,
+    )
 
     for line in lines:
         if step_header.match(line):
@@ -66,6 +102,19 @@ def split_animation_plan(plan_text):
     return cleaned_steps
 
 
+def format_plan_step(step_text, step_index):
+    cleaned_step = str(step_text or "").strip()
+    cleaned_step = re.sub(
+        r"^\sStep\s*\d+\s*:\s*",
+        "",
+        cleaned_step,
+        flags=re.IGNORECASE,
+    )
+    cleaned_step = re.sub(r"^\s*Step\s*\d+\s*:\s*", "", cleaned_step, flags=re.IGNORECASE)
+    cleaned_step = re.sub(r"\s+", " ", cleaned_step).strip()
+    return f"Step {step_index}: {cleaned_step}"
+
+
 def load_keyframe_agent_class():
     try:
         from .keyframe_agent import KeyFrameAgent
@@ -81,7 +130,7 @@ def load_keyframe_agent_class():
 
         module_ast = ast.parse(source, filename=module_path)
         allowed_nodes = []
-        allowed_assignments = {"SYSTEM_MESSAGE", "animation_examples"}
+        allowed_assignments = {"SYSTEM_MESSAGE", "REPAIR_SYSTEM_MESSAGE", "animation_examples"}
 
         for node in module_ast.body:
             if isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef)):
@@ -128,6 +177,21 @@ def _clear_generation_job(scene):
         _GENERATION_JOBS.pop(_scene_job_key(scene), None)
 
 
+def _get_prompt_refinement_job(scene):
+    with _PROMPT_REFINEMENT_JOBS_LOCK:
+        return _PROMPT_REFINEMENT_JOBS.get(_scene_job_key(scene))
+
+
+def _set_prompt_refinement_job(scene, job_state):
+    with _PROMPT_REFINEMENT_JOBS_LOCK:
+        _PROMPT_REFINEMENT_JOBS[_scene_job_key(scene)] = job_state
+
+
+def _clear_prompt_refinement_job(scene):
+    with _PROMPT_REFINEMENT_JOBS_LOCK:
+        _PROMPT_REFINEMENT_JOBS.pop(_scene_job_key(scene), None)
+
+
 def _tag_redraw():
     window_manager = getattr(bpy.context, "window_manager", None)
     if window_manager is None:
@@ -146,6 +210,10 @@ def _set_status(job_state, status, animate=False):
     job_state["status"] = status
     job_state["status_base"] = status if animate else ""
     job_state["status_dots"] = 0
+
+
+def _is_refinement_job(job_state):
+    return job_state.get("mode") == "REFINEMENT"
 
 
 def _animate_waiting_status(scene, job_state):
@@ -225,18 +293,424 @@ def _queue_worker_error(result_queue, message, item_type="error", **extra):
     result_queue.put(payload)
 
 
+def _queue_refinement_status(
+    result_queue,
+    status,
+    current_instruction="",
+    log=None,
+    animate=False,
+    **extra,
+):
+    payload = {
+        "type": "refinement_status",
+        "status": status,
+        "current_instruction": current_instruction,
+        "log": log,
+        "animate": animate,
+    }
+    payload.update(extra)
+    result_queue.put(payload)
+
+
+def _axis_world_component(axis):
+    axis = str(axis or "")
+    return axis[-1:] if axis in _AXIS_VALUES else ""
+
+
+def _validate_direction_axes(forward_axis, up_axis, right_axis):
+    axes = (forward_axis, up_axis, right_axis)
+    if any(axis not in _AXIS_VALUES for axis in axes):
+        return "Choose a valid Forward, Up, and Right axis."
+
+    world_components = [_axis_world_component(axis) for axis in axes]
+    if len(set(world_components)) != 3:
+        return "Forward, Up, and Right must use three different world axes."
+
+    return ""
+
+
+def _direction_settings_from_scene(scene):
+    return {
+        "forward_axis": getattr(scene, "gen_forward_axis", "+Y"),
+        "up_axis": getattr(scene, "gen_up_axis", "+Z"),
+        "right_axis": getattr(scene, "gen_right_axis", "+X"),
+    }
+
+
+def _validate_scene_direction_settings(scene):
+    settings = _direction_settings_from_scene(scene)
+    return _validate_direction_axes(
+        settings["forward_axis"],
+        settings["up_axis"],
+        settings["right_axis"],
+    )
+
+
+def _format_direction_context(direction_settings):
+    forward_axis = direction_settings["forward_axis"]
+    up_axis = direction_settings["up_axis"]
+    right_axis = direction_settings["right_axis"]
+    return (
+        "Semantic direction inference: "
+        f"forward_axis={forward_axis}, "
+        f"up_axis={up_axis}, "
+        f"right_axis={right_axis}, "
+        "is_humanoid=null, "
+        "confidence=1.00, "
+        "needs_user_confirmation=false"
+    )
+
+
+def _append_direction_context(object_json, direction_settings):
+    if direction_settings is None:
+        return object_json
+
+    validation_error = _validate_direction_axes(
+        direction_settings.get("forward_axis"),
+        direction_settings.get("up_axis"),
+        direction_settings.get("right_axis"),
+    )
+    if validation_error:
+        raise ValueError(validation_error)
+
+    return f"{object_json}\n{_format_direction_context(direction_settings)}"
+
+
+def _get_prompt_refinement_history(scene):
+    raw_history = getattr(scene, "gen_refinement_history", "")
+    if not raw_history:
+        return []
+
+    try:
+        history = json.loads(raw_history)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(history, list):
+        return []
+
+    cleaned_history = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if question and answer:
+            cleaned_history.append({"question": question, "answer": answer})
+
+    return cleaned_history
+
+
+def _set_prompt_refinement_history(scene, history):
+    scene.gen_refinement_history = json.dumps(history or [], ensure_ascii=True)
+
+
+def _format_clarification_history(clarification_history):
+    if not clarification_history:
+        return "None."
+
+    lines = []
+    for index, item in enumerate(clarification_history, start=1):
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if question and answer:
+            lines.append(f"{index}. Q: {question} A: {answer}")
+
+    return "\n".join(lines) if lines else "None."
+
+
+def _build_refined_prompt(original_prompt, clarification_history):
+    prompt = str(original_prompt or "").strip()
+    answered_items = []
+
+    for item in clarification_history or []:
+        if not isinstance(item, dict):
+            continue
+
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip().title()
+        if not question or answer == "Skip":
+            continue
+
+        answered_items.append(f"- {question} Answer: {answer}.")
+
+    if not answered_items:
+        return prompt
+
+    return (
+        f"{prompt}\n\n"
+        "Resolved animation clarifications that are part of this request:\n"
+        + "\n".join(answered_items)
+    ).strip()
+
+
+def _reset_prompt_refinement_state(scene, status="Not refined"):
+    scene.gen_current_question = ""
+    scene.gen_refined_prompt = ""
+    scene.gen_refinement_status = status
+    scene.gen_refinement_loading = False
+    scene.gen_refinement_prompt_snapshot = ""
+    scene.gen_refinement_object_snapshot = ""
+    scene.gen_refinement_object_json_snapshot = ""
+    _set_prompt_refinement_history(scene, [])
+
+
+def _finish_prompt_refinement(scene, history, final_prompt=None):
+    scene.gen_current_question = ""
+    scene.gen_refined_prompt = str(final_prompt or "").strip() or _build_refined_prompt(
+        scene.gen_prompt,
+        history,
+    )
+    scene.gen_refinement_status = "Complete"
+    scene.gen_refinement_loading = False
+    scene.gen_refinement_prompt_snapshot = str(scene.gen_prompt or "").strip()
+    _tag_redraw()
+
+
+def _prompt_refinement_worker(result_queue, prompt_text, object_name, object_json, history):
+    try:
+        from .prompt_refinement_agent import PromptRefinementAgent
+
+        agent = PromptRefinementAgent()
+        if len(history) >= MAX_PROMPT_REFINEMENT_QUESTIONS:
+            final_prompt = agent.synthesize_final_prompt(prompt_text, history)
+            result_queue.put({"type": "stop", "final_prompt": final_prompt})
+            return
+
+        current_prompt = _build_refined_prompt(prompt_text, history)
+        decision = agent.decide(
+            current_prompt=current_prompt,
+            object_name=object_name,
+            object_json=object_json,
+            clarification_history=history,
+            question_count=len(history),
+        )
+
+        if decision["status"] == "QUESTION":
+            result_queue.put({"type": "question", "question": decision["question"]})
+            return
+
+        final_prompt = agent.synthesize_final_prompt(prompt_text, history)
+        result_queue.put({"type": "stop", "final_prompt": final_prompt})
+    except Exception as error:
+        print("[Prompt Refinement] Worker failed:")
+        print(traceback.format_exc())
+        result_queue.put({"type": "error", "message": str(error)})
+
+
+def _resolve_prompt_refinement_object_context(context, scene, reset=False):
+    from .SceneParser import SceneParser
+
+    current_object_name = _resolve_target_object_name(context, scene)
+    if current_object_name == "__NONE__":
+        current_object_name = ""
+
+    snapshot_object_name = str(
+        getattr(scene, "gen_refinement_object_snapshot", "") or ""
+    ).strip()
+    snapshot_object_json = str(
+        getattr(scene, "gen_refinement_object_json_snapshot", "") or ""
+    ).strip()
+
+    def parse_object_json(object_name):
+        target_object = bpy.data.objects.get(object_name)
+        if target_object is None:
+            raise ValueError(f"Object `{object_name}` was not found.")
+        if getattr(target_object, "type", None) != "ARMATURE":
+            raise ValueError("Select an armature before refining an animation prompt.")
+        parser = SceneParser(precision=1)
+        return parser.generate_object_json([object_name])
+
+    if reset:
+        if not current_object_name:
+            raise ValueError("Select an armature before refining.")
+        object_json = parse_object_json(current_object_name)
+        scene.gen_refinement_object_snapshot = current_object_name
+        scene.gen_refinement_object_json_snapshot = object_json
+        return current_object_name, object_json
+
+    if not snapshot_object_name:
+        if not current_object_name:
+            raise ValueError("Select an armature before refining.")
+        object_json = parse_object_json(current_object_name)
+        scene.gen_refinement_object_snapshot = current_object_name
+        scene.gen_refinement_object_json_snapshot = object_json
+        return current_object_name, object_json
+
+    if current_object_name and current_object_name != snapshot_object_name:
+        raise ValueError("Object changed; run Prompt Refinement again for the selected armature.")
+
+    if not snapshot_object_json:
+        snapshot_object_json = parse_object_json(snapshot_object_name)
+        scene.gen_refinement_object_json_snapshot = snapshot_object_json
+
+    return snapshot_object_name, snapshot_object_json
+
+
+def _start_prompt_refinement_job(scene, context, reset=False):
+    if getattr(scene, "gen_action_mode", "ANIMATE") != "ANIMATE":
+        raise ValueError("Prompt refinement is only available in Animate mode.")
+
+    prompt_text = str(scene.gen_prompt or "").strip()
+    if not prompt_text or prompt_text == "Write your prompt here...":
+        raise ValueError("Please enter a real prompt before refining.")
+
+    existing_job = _get_prompt_refinement_job(scene)
+    if (
+        scene.gen_refinement_loading
+        and existing_job is not None
+        and existing_job["thread"].is_alive()
+    ):
+        raise RuntimeError("Prompt refinement is already running.")
+
+    if reset:
+        _set_prompt_refinement_history(scene, [])
+        scene.gen_current_question = ""
+        scene.gen_refined_prompt = ""
+        scene.gen_refinement_prompt_snapshot = prompt_text
+        scene.gen_refinement_object_snapshot = ""
+        scene.gen_refinement_object_json_snapshot = ""
+
+    object_name, object_json = _resolve_prompt_refinement_object_context(
+        context,
+        scene,
+        reset=reset,
+    )
+    history = _get_prompt_refinement_history(scene)
+
+    result_queue = queue.Queue()
+    worker_thread = threading.Thread(
+        target=_prompt_refinement_worker,
+        args=(result_queue, prompt_text, object_name, object_json, history),
+        name="PromptRefinementWorker",
+        daemon=True,
+    )
+
+    job_state = {
+        "thread": worker_thread,
+        "result_queue": result_queue,
+        "prompt_snapshot": prompt_text,
+        "object_snapshot": object_name,
+        "history": history,
+        "status_base": "Refining prompt",
+        "status_dots": 0,
+    }
+
+    scene.gen_refinement_loading = True
+    scene.gen_refinement_status = "Refining prompt"
+    _set_prompt_refinement_job(scene, job_state)
+    worker_thread.start()
+    _register_prompt_refinement_timer(scene)
+    _tag_redraw()
+
+
+def _handle_prompt_refinement_queue(scene):
+    job_state = _get_prompt_refinement_job(scene)
+    if job_state is None:
+        scene.gen_refinement_loading = False
+        _tag_redraw()
+        return None
+
+    result_queue = job_state["result_queue"]
+
+    try:
+        item = result_queue.get_nowait()
+    except queue.Empty:
+        if not job_state["thread"].is_alive():
+            scene.gen_refinement_loading = False
+            scene.gen_refinement_status = "Refinement worker stopped"
+            _clear_prompt_refinement_job(scene)
+            _tag_redraw()
+            return None
+
+        dots = "." * (job_state.get("status_dots", 0) % 4)
+        job_state["status_dots"] = job_state.get("status_dots", 0) + 1
+        scene.gen_refinement_status = f"{job_state['status_base']}{dots}"
+        _tag_redraw()
+        return _TIMER_INTERVAL
+
+    if str(scene.gen_prompt or "").strip() != job_state["prompt_snapshot"]:
+        scene.gen_refinement_loading = False
+        scene.gen_refinement_status = "Prompt changed; refine again"
+        scene.gen_current_question = ""
+        scene.gen_refined_prompt = ""
+        _clear_prompt_refinement_job(scene)
+        _tag_redraw()
+        return None
+
+    item_type = item["type"]
+    history = _get_prompt_refinement_history(scene)
+
+    if item_type == "question":
+        scene.gen_current_question = item["question"]
+        scene.gen_refined_prompt = ""
+        scene.gen_refinement_loading = False
+        scene.gen_refinement_status = (
+            f"Question {len(history) + 1}/{MAX_PROMPT_REFINEMENT_QUESTIONS}"
+        )
+        _clear_prompt_refinement_job(scene)
+        _tag_redraw()
+        return None
+
+    if item_type == "stop":
+        _finish_prompt_refinement(scene, history, final_prompt=item.get("final_prompt"))
+        _clear_prompt_refinement_job(scene)
+        return None
+
+    if item_type == "error":
+        scene.gen_refinement_loading = False
+        scene.gen_refinement_status = f"Refinement failed: {item.get('message')}"
+        scene.gen_current_question = ""
+        scene.gen_refined_prompt = ""
+        _clear_prompt_refinement_job(scene)
+        _tag_redraw()
+        return None
+
+    return _TIMER_INTERVAL
+
+
+def _prompt_refined_prompt_is_current(scene, object_name):
+    return (
+        bool(str(getattr(scene, "gen_refined_prompt", "") or "").strip())
+        and str(getattr(scene, "gen_refinement_prompt_snapshot", "") or "").strip()
+        == str(getattr(scene, "gen_prompt", "") or "").strip()
+        and str(getattr(scene, "gen_refinement_object_snapshot", "") or "").strip()
+        == str(object_name or "").strip()
+    )
+
+
+def _get_generation_prompt_and_history(scene, object_name):
+    if _prompt_refined_prompt_is_current(scene, object_name):
+        return (
+            str(scene.gen_refined_prompt or "").strip(),
+            _get_prompt_refinement_history(scene),
+            True,
+        )
+
+    return str(scene.gen_prompt or "").strip(), [], False
+
+
 def _generation_worker(request_queue, result_queue, object_name, object_json, prompt):
     try:
+        from .planner_agent import run_llm
+
         print(f"[Generator] Worker started for object `{object_name}`.")
         print("[Generator] Stage 2: Generating animation plan in background thread.")
         animation_plan = run_llm(object_name, object_json, prompt)
+        print(animation_plan)
         plan_steps = split_animation_plan(animation_plan)
-#         animation_plan = [
-#         "a man picks up an unseen object to his front left and moves it to an unseen platform on this front right without moving his feet."
-# ]
-#         plan_steps = [
-#         "a man picks up an unseen object to his front left and moves it to an unseen platform on this front right without moving his feet."
-#     ]
+
+        if not plan_steps:
+            fallback_step = str(prompt).strip()
+            plan_steps = [fallback_step] if fallback_step else []
+            if plan_steps:
+                animation_plan = "\n".join(
+                    f"Step {index}: {step}"
+                    for index, step in enumerate(plan_steps, start=1)
+                )
+
         result_queue.put(
             {
                 "type": "plan",
@@ -268,8 +742,11 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                 continue
 
             index = request["index"]
-            instruction = request["step"]
+            current_plan_step = request["current_plan_step"]
             previous_animation = request.get("previous_animation")
+            plan_history = request.get("plan_history")
+            last_step_index = request.get("last_step_index")
+            user_instruction = request.get("user_instruction")
 
             print(f"[Generator] Worker generating keyframes for step {index}.")
 
@@ -278,7 +755,10 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                     {
                         "object": object_name,
                         "object_json": request["object_json"],
-                        "instruction": instruction,
+                        "user_instruction": user_instruction,
+                        "current_plan_step": current_plan_step,
+                        "plan_history": plan_history,
+                        "last_step_index": last_step_index,
                         "previous_animation": previous_animation,
                     }
                 )
@@ -290,7 +770,7 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                     f"Keyframe generation failed for step {index}: {error}",
                     item_type="step_error",
                     index=index,
-                    step=instruction,
+                    step=current_plan_step,
                 )
                 continue
 
@@ -301,7 +781,7 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                     f"Keyframe generation returned no result for step {index}.",
                     item_type="step_error",
                     index=index,
-                    step=instruction,
+                    step=current_plan_step,
                 )
                 continue
 
@@ -309,7 +789,7 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
                 {
                     "type": "step_result",
                     "index": index,
-                    "step": instruction,
+                    "step": current_plan_step,
                     "response": response,
                 }
             )
@@ -319,19 +799,75 @@ def _generation_worker(request_queue, result_queue, object_name, object_json, pr
         _queue_worker_error(result_queue, f"Generation failed: {error}")
 
 
+def _refinement_worker(
+    request_queue,
+    result_queue,
+    object_name,
+    object_json,
+    prompt,
+    preview_armature_name=None,
+):
+    try:
+        print(f"[Generator] Worker started for object `{object_name}`.")
+        print(f"[Generator] Refinement worker started for object `{object_name}`.")
+        plan, keyframes, feedback = run_with_refinement(
+            prompt,
+            object_name=object_name,
+            object_json=object_json,
+            request_queue=request_queue,
+            result_queue=result_queue,
+            preview_armature_name=preview_armature_name,
+            debug=True,
+        )
+        result_queue.put(
+            {
+                "type": "refinement_complete",
+                "plan": plan,
+                "keyframes": keyframes,
+                "feedback": feedback,
+            }
+        )
+    except Exception as error:
+        print("[Generator] Worker thread failed:")
+        print(traceback.format_exc())
+        _queue_worker_error(result_queue, f"Generation failed: {error}")
+
+
 def _execute_generation_step(scene, job_state, item):
+    from . import preview_manager
+
     index = item["index"]
     step = item["step"]
     response = item["response"]
+    preview_armature = preview_manager.get_preview_armature()
+    preview_armature_name = (
+        getattr(preview_armature, "name", "")
+        or job_state.get("preview_armature_name")
+        or job_state["object_name"]
+    )
 
     _set_status(job_state, f"Executing Step {index}")
     _refresh_scene_output(scene, job_state)
 
     try:
         print(f"[Generator] Stage 5.{index}: Executing keyframes in Blender.")
-        job_state["executor"].execute_from_text(response)
+        print(f"[Preview] Executing direct generation on preview armature `{preview_armature_name}`.")
+        job_state["executor"].execute_from_text(
+            response,
+            armature_name=preview_armature_name,
+            clear_existing_action=index == 1,
+        )
+        preview_action = preview_manager.refresh_preview_action(scene)
+        if preview_action is not None:
+            job_state["preview_action_name"] = preview_action.name
+            print(f"[Preview] Preview action updated to `{preview_action.name}`.")
         print(f"[Generator] Blender execution completed for step {index}.")
-        job_state["previous_animation"] = response
+        job_state["all_outputs"].append(response)
+        job_state["previous_animation"] = "\n".join(
+            output for output in job_state["all_outputs"] if str(output).strip()
+        )
+        job_state["plan_history"].append(step)
+        job_state["final_animation"] = job_state["previous_animation"]
         job_state["step_logs"].append(f"Executed Step {index}: {step}")
     except Exception as error:
         print(f"[Generator] Blender execution failed for step {index}: {error}")
@@ -351,9 +887,107 @@ def _execute_generation_step(scene, job_state, item):
         _finalize_generation(scene, job_state)
         return
 
-    job_state["current_instruction"] = job_state["steps"][job_state["current_step"]]
+    next_step_index = job_state["current_step"] + 1
+    job_state["current_instruction"] = format_plan_step(
+        job_state["steps"][job_state["current_step"]],
+        next_step_index,
+    )
     _set_status(job_state, f"Step {index} complete")
     _refresh_scene_output(scene, job_state)
+
+
+def _execute_refinement_iteration(scene, job_state, item):
+    from . import preview_manager
+    from .skeleton_recorder import extract_skeleton_frames
+
+    iteration = item["iteration"]
+    keyframes = item["keyframes"]
+    preview_armature = preview_manager.get_preview_armature()
+    preview_armature_name = (
+        getattr(preview_armature, "name", "")
+        or job_state.get("preview_armature_name")
+        or job_state["object_name"]
+    )
+
+    job_state["current_step"] = iteration
+    job_state["current_instruction"] = f"Iteration {iteration}"
+    job_state["waiting_for_llm"] = False
+    _set_status(job_state, f"Executing iteration {iteration}")
+    _refresh_scene_output(scene, job_state)
+
+    try:
+        print(f"[Generator] Refinement Stage {iteration}: Executing keyframes in Blender.")
+        print(f"[Preview] Executing refinement on preview armature `{preview_armature_name}`.")
+        job_state["executor"].execute_from_text(
+            keyframes,
+            armature_name=preview_armature_name,
+            clear_existing_action=True,
+        )
+        preview_action = preview_manager.refresh_preview_action(scene)
+        if preview_action is not None:
+            job_state["preview_action_name"] = preview_action.name
+            print(f"[Preview] Preview action updated to `{preview_action.name}`.")
+        print(f"[Generator] Refinement Blender execution completed for iteration {iteration}.")
+        job_state["final_animation"] = keyframes
+        job_state["previous_animation"] = keyframes
+
+        _set_status(job_state, "Rendering visual evidence")
+        _refresh_scene_output(scene, job_state)
+        print(
+            f"[Generator] Refinement Stage {iteration}: "
+            f"Extracting skeleton frames from preview armature `{preview_armature_name}`."
+        )
+        skeleton_frames = extract_skeleton_frames(preview_armature_name)
+        print(f"[Generator] Skeleton extraction completed for iteration {iteration}.")
+        visual = _build_visual_evidence_for_iteration(
+            prompt=job_state.get("user_prompt", ""),
+            armature_name=preview_armature_name,
+            skeleton_frames=skeleton_frames,
+            scene=scene,
+        )
+
+        job_state["request_queue"].put(
+            {
+                "type": "refinement_iteration_data",
+                "iteration": iteration,
+                "visual": visual,
+            }
+        )
+    except Exception as error:
+        print(f"[Generator] Refinement iteration {iteration} failed in Blender: {error}")
+        print(traceback.format_exc())
+        job_state["step_logs"].append(f"Refinement iteration {iteration} failed: {error}")
+        job_state["request_queue"].put(
+            {
+                "type": "refinement_iteration_error",
+                "iteration": iteration,
+                "message": str(error),
+            }
+        )
+        _set_status(job_state, f"Refinement iteration {iteration} failed")
+        _refresh_scene_output(scene, job_state)
+        _finalize_generation(scene, job_state)
+
+
+def _build_visual_evidence_for_iteration(prompt, armature_name, skeleton_frames, scene=None):
+    from .mesh_renderer import MeshRenderer, build_visual_evidence
+    from .skeleton_visualizer import SkeletonVisualizer
+
+    armature = bpy.data.objects.get(armature_name)
+    if armature is None:
+        raise ValueError(f"Armature `{armature_name}` was not found while building visual evidence.")
+
+    print(f"[Generator] Building VisualEvidence for `{armature_name}`.")
+    skeleton_collage_sequence = SkeletonVisualizer().render_collage_sequence(skeleton_frames)
+    frame_count = max(len(skeleton_collage_sequence), 1)
+    frame_objects = [[armature] for _ in range(frame_count)]
+    mesh_collage_sequence = MeshRenderer(scene=scene).render_collage_sequence(frame_objects)
+
+    return build_visual_evidence(
+        prompt=prompt,
+        mesh_collage_sequence=mesh_collage_sequence,
+        skeleton_collage_sequence=skeleton_collage_sequence,
+    )
 
 
 def _dispatch_next_step(scene, job_state):
@@ -366,13 +1000,18 @@ def _dispatch_next_step(scene, job_state):
 
     step_index = job_state["current_step"] + 1
     instruction = job_state["steps"][job_state["current_step"]]
-    job_state["current_instruction"] = instruction
+    current_plan_step = format_plan_step(instruction, step_index)
+    job_state["current_instruction"] = current_plan_step
 
     _set_status(job_state, f"Parsing scene for Step {step_index}")
     _refresh_scene_output(scene, job_state)
 
     try:
         object_json = job_state["parser"].generate_object_json([job_state["object_name"]])
+        object_json = _append_direction_context(
+            object_json,
+            job_state.get("direction_settings"),
+        )
         print(f"[Generator] Parsed fresh scene state for step {step_index}.")
     except Exception as error:
         print(f"[Generator] Scene parse failed for step {step_index}: {error}")
@@ -389,7 +1028,10 @@ def _dispatch_next_step(scene, job_state):
         {
             "type": "step",
             "index": step_index,
-            "step": instruction,
+            "current_plan_step": current_plan_step,
+            "plan_history": list(job_state["plan_history"]),
+            "last_step_index": len(job_state["plan_history"]),
+            "user_instruction": job_state["user_prompt"],
             "object_json": object_json,
             "previous_animation": job_state["previous_animation"],
         }
@@ -423,24 +1065,80 @@ def _handle_generation_queue(scene):
             _animate_waiting_status(scene, job_state)
             return _TIMER_INTERVAL
 
-        if job_state["plan_ready"] and job_state["current_step"] < job_state["total_steps"]:
+        if (
+            not _is_refinement_job(job_state)
+            and job_state["plan_ready"]
+            and job_state["current_step"] < job_state["total_steps"]
+        ):
             _dispatch_next_step(scene, job_state)
             return _TIMER_INTERVAL if _get_generation_job(scene) is not None else None
 
         return _TIMER_INTERVAL
 
     item_type = item["type"]
+    if item_type.startswith("refinement_") and not _is_refinement_job(job_state):
+        print(f"[Generator] Ignoring refinement queue event `{item_type}` for direct generation job.")
+        return _TIMER_INTERVAL
 
     if item_type == "plan":
+        job_state["waiting_for_llm"] = False
         job_state["plan_text"] = item["plan"]
         job_state["steps"] = item["steps"]
         job_state["total_steps"] = len(item["steps"])
         job_state["plan_ready"] = True
-        job_state["current_instruction"] = job_state["steps"][0] if job_state["steps"] else ""
+        job_state["current_instruction"] = (
+            format_plan_step(job_state["steps"][0], 1) if job_state["steps"] else ""
+        )
         job_state["step_logs"].append(f"Planner returned {job_state['total_steps']} step(s).")
         _set_status(job_state, f"Plan ready ({job_state['total_steps']} steps)")
         _refresh_scene_output(scene, job_state)
         return _TIMER_INTERVAL
+
+    if item_type == "refinement_status":
+        job_state["waiting_for_llm"] = bool(item.get("animate", False))
+        if item.get("current_instruction") is not None:
+            job_state["current_instruction"] = item.get("current_instruction") or job_state["current_instruction"]
+        log_message = item.get("log")
+        if log_message:
+            job_state["step_logs"].append(log_message)
+        _set_status(job_state, item["status"], animate=bool(item.get("animate", False)))
+        _refresh_scene_output(scene, job_state)
+        return _TIMER_INTERVAL
+
+    if item_type == "refinement_plan":
+        job_state["plan_text"] = item["plan"]
+        job_state["steps"] = item.get("steps", [])
+        job_state["plan_ready"] = True
+        job_state["step_logs"].append(f"Initial planner returned {len(job_state['steps'])} step(s).")
+        _set_status(job_state, "Generating keyframes", animate=True)
+        _refresh_scene_output(scene, job_state)
+        return _TIMER_INTERVAL
+
+    if item_type == "refinement_execute":
+        _execute_refinement_iteration(scene, job_state, item)
+        return _TIMER_INTERVAL if _get_generation_job(scene) is not None else None
+
+    if item_type == "refinement_complete":
+        job_state["waiting_for_llm"] = False
+        print("[Generator] Refinement completed.")
+        job_state["plan_text"] = item["plan"]
+        job_state["final_plan"] = item["plan"]
+        job_state["final_keyframes"] = item["keyframes"]
+        job_state["final_feedback"] = item["feedback"]
+        job_state["final_animation"] = item["keyframes"]
+        job_state["previous_animation"] = item["keyframes"]
+        job_state["all_outputs"] = [item["keyframes"]]
+
+        faithfulness_score = float(item["feedback"].get("faithfulness", {}).get("score", 0.0))
+        realism_score = float(item["feedback"].get("realism", {}).get("score", 0.0))
+        job_state["step_logs"].append(
+            f"Final feedback: faithfulness={faithfulness_score:.3f}, realism={realism_score:.3f}"
+        )
+        job_state["current_instruction"] = ""
+        _set_status(job_state, "Completed")
+        _refresh_scene_output(scene, job_state)
+        _finalize_generation(scene, job_state)
+        return None
 
     if item_type == "step_result":
         job_state["waiting_for_llm"] = False
@@ -474,26 +1172,496 @@ def _register_generation_timer(scene):
     bpy.app.timers.register(timer_callback, first_interval=_TIMER_INTERVAL)
 
 
+def _register_prompt_refinement_timer(scene):
+    def timer_callback():
+        return _handle_prompt_refinement_queue(scene)
+
+    bpy.app.timers.register(timer_callback, first_interval=_TIMER_INTERVAL)
+
+
 def _resolve_target_object_name(context, scene):
-    if getattr(scene, "gen_mode", ""):
-        return scene.gen_mode
+    selected_name = getattr(scene, "gen_mode", "")
+    if selected_name and selected_name != "__NONE__":
+        return selected_name
     if context.active_object is not None:
         return context.active_object.name
     return ""
 
 
+def run_with_refinement(
+    prompt,
+    object_name=None,
+    scene=None,
+    max_iters=4,
+    score_threshold=0.9,
+    debug=False,
+    object_json=None,
+    request_queue=None,
+    result_queue=None,
+    preview_armature_name=None,
+):
+    from .SceneParser import SceneParser
+    from .critic_agent import evaluate_motion
+    from .planner_agent import run_llm
+    from .refinement import generate_keyframes_for_plan, refine
+    from .skeleton_recorder import extract_skeleton_frames
+
+    queue_mode = request_queue is not None and result_queue is not None
+    active_scene = None if queue_mode else scene or bpy.context.scene
+    active_object_name = object_name
+    if not active_object_name and active_scene is not None:
+        active_object_name = _resolve_target_object_name(bpy.context, active_scene)
+    if not active_object_name:
+        raise ValueError("run_with_refinement requires an armature object name.")
+    execution_armature_name = preview_armature_name or active_object_name
+
+    if object_json is None:
+        if queue_mode:
+            raise ValueError("Queue-based run_with_refinement requires pre-parsed object_json.")
+        parser = SceneParser(precision=1)
+        object_json = parser.generate_object_json([active_object_name])
+        direction_settings = _direction_settings_from_scene(active_scene)
+        object_json = _append_direction_context(object_json, direction_settings)
+
+    executor = None if queue_mode else BlenderExecutor()
+
+    if result_queue is not None:
+        _queue_refinement_status(result_queue, "Generating plan", animate=True)
+
+    print("[Generator] Stage 2: Generating animation plan in background thread.")
+    plan = run_llm(active_object_name, object_json, prompt)
+    print(plan)
+    plan_steps = split_animation_plan(plan)
+    if result_queue is not None:
+        result_queue.put(
+            {
+                "type": "refinement_plan",
+                "plan": str(plan),
+                "steps": list(plan_steps),
+            }
+        )
+
+    if result_queue is not None:
+        _queue_refinement_status(result_queue, "Generating keyframes", animate=True)
+    print("[Generator] Stage 3: Generating keyframes for refinement.")
+    keyframes = generate_keyframes_for_plan(
+        object_name=active_object_name,
+        object_json=object_json,
+        prompt=prompt,
+        plan_text=plan,
+    )
+
+    previous_score = 0.0
+    feedback = {
+        "faithfulness": {"score": 0.0, "issues": []},
+        "realism": {"score": 0.0, "issues": []},
+    }
+    critic_state = {
+        "iteration": 0,
+        "previous_issues": [],
+        "resolved_issues": [],
+        "previous_score": {},
+    }
+
+    for iteration in range(1, int(max_iters) + 1):
+        if result_queue is not None:
+            _queue_refinement_status(
+                result_queue,
+                f"Executing iteration {iteration}",
+                current_instruction=f"Iteration {iteration}",
+            )
+
+        if queue_mode:
+            visual = _request_refinement_iteration_execution(
+                request_queue=request_queue,
+                result_queue=result_queue,
+                iteration=iteration,
+                keyframes=keyframes,
+            )
+        else:
+            print(f"[Generator] Refinement Stage {iteration}: Executing keyframes in Blender.")
+            print(f"[Preview] Executing refinement on armature `{execution_armature_name}`.")
+            executor.execute_from_text(
+                keyframes,
+                armature_name=execution_armature_name,
+                clear_existing_action=True,
+            )
+            print(f"[Generator] Refinement Blender execution completed for iteration {iteration}.")
+            print(
+                f"[Generator] Refinement Stage {iteration}: "
+                f"Extracting skeleton frames from `{execution_armature_name}`."
+            )
+            skeleton_frames = extract_skeleton_frames(execution_armature_name)
+            visual = _build_visual_evidence_for_iteration(
+                prompt=prompt,
+                armature_name=execution_armature_name,
+                skeleton_frames=skeleton_frames,
+                scene=active_scene,
+            )
+
+        if result_queue is not None:
+            _queue_refinement_status(
+                result_queue,
+                "Evaluating motion",
+                current_instruction=f"Iteration {iteration}",
+                animate=True,
+            )
+        print(f"[Generator] Refinement Stage {iteration}: Evaluating motion.")
+        feedback = evaluate_motion(prompt, visual, critic_state=critic_state)
+
+        faithfulness_score = float(feedback.get("faithfulness", {}).get("score", 0.0))
+        realism_score = float(feedback.get("realism", {}).get("score", 0.0))
+        score = (faithfulness_score + realism_score) / 2.0
+
+        faithfulness_issues = feedback.get("faithfulness", {}).get("issues", [])
+        realism_issues = feedback.get("realism", {}).get("issues", [])
+        issue_count = len(faithfulness_issues) + len(realism_issues)
+
+        if debug:
+            print(
+                "[Refinement] "
+                f"iteration={iteration} "
+                f"faithfulness={faithfulness_score:.3f} "
+                f"realism={realism_score:.3f} "
+                f"issues={issue_count}"
+            )
+        if result_queue is not None:
+            _queue_refinement_status(
+                result_queue,
+                f"Iteration {iteration} evaluated",
+                current_instruction=f"Iteration {iteration}",
+                log=(
+                    f"Iteration {iteration}: "
+                    f"faithfulness={faithfulness_score:.3f}, "
+                    f"realism={realism_score:.3f}, "
+                    f"issues={issue_count}"
+                ),
+            )
+
+        if iteration > 1 and score <= previous_score:
+            print(f"[Refinement] Stopping because score did not improve at iteration {iteration}.")
+            break
+
+        if faithfulness_score > score_threshold and realism_score > score_threshold:
+            print(f"[Refinement] Stopping because threshold was reached at iteration {iteration}.")
+            break
+
+        if iteration >= int(max_iters):
+            print(f"[Refinement] Stopping because max iterations was reached at iteration {iteration}.")
+            break
+
+        if result_queue is not None:
+            _queue_refinement_status(
+                result_queue,
+                "Generating plan fixes",
+                current_instruction=f"Iteration {iteration}",
+                animate=True,
+            )
+        print(f"[Generator] Refinement Stage {iteration}: Generating plan fixes and patching plan.")
+        plan, keyframes = refine(
+            plan,
+            keyframes,
+            feedback,
+            object_name=active_object_name,
+            object_json=object_json,
+            prompt=prompt,
+            visual=visual,
+        )
+        previous_score = score
+
+    return plan, keyframes, feedback
+
+
+def _request_refinement_iteration_execution(
+    request_queue,
+    result_queue,
+    iteration,
+    keyframes,
+):
+    result_queue.put(
+        {
+            "type": "refinement_execute",
+            "iteration": iteration,
+            "keyframes": keyframes,
+        }
+    )
+
+    while True:
+        response = request_queue.get()
+        if response is None:
+            raise RuntimeError("Refinement worker received an empty main-thread response.")
+
+        response_type = response.get("type")
+        if response_type == "shutdown":
+            print("[Generator] Worker received shutdown signal.")
+            raise RuntimeError("Refinement worker was shut down before completion.")
+
+        if response.get("iteration") != iteration:
+            continue
+
+        if response_type == "refinement_iteration_error":
+            raise RuntimeError(response.get("message") or "Refinement iteration failed in Blender.")
+
+        if response_type == "refinement_iteration_data":
+            return response["visual"]
+
+
+def _scene_has_preview(scene):
+    try:
+        from . import preview_manager
+
+        return preview_manager.preview_exists(scene)
+    except Exception as error:
+        print(f"[Preview] Preview state check failed: {error}")
+        return False
+
+
+def _run_direction_inference_into_scene(context, object_name):
+    from .direction_inference_agent import DirectionInferenceAgent
+
+    scene = context.scene
+    print("[Generator] Inferring semantic direction on main thread.")
+    direction_result = DirectionInferenceAgent(context=context).infer([object_name])
+
+    inferred_settings = {
+        "forward_axis": direction_result.forward_axis,
+        "up_axis": direction_result.up_axis,
+        "right_axis": direction_result.right_axis,
+    }
+    validation_error = _validate_direction_axes(
+        inferred_settings["forward_axis"],
+        inferred_settings["up_axis"],
+        inferred_settings["right_axis"],
+    )
+    if validation_error:
+        raise ValueError(f"Direction inference returned unusable axes: {validation_error}")
+
+    scene.gen_forward_axis = inferred_settings["forward_axis"]
+    scene.gen_up_axis = inferred_settings["up_axis"]
+    scene.gen_right_axis = inferred_settings["right_axis"]
+    scene.gen_direction_inference_ready = True
+    scene.gen_direction_inferred_object_name = object_name
+    scene.gen_direction_error = ""
+
+    print(
+        "[Generator] Direction inference populated UI controls: "
+        f"forward={direction_result.forward_axis}, "
+        f"up={direction_result.up_axis}, "
+        f"right={direction_result.right_axis}, "
+        f"humanoid={direction_result.is_humanoid}, "
+        f"confidence={direction_result.confidence:.2f}."
+    )
+    scene.gen_output = (
+        "Status: Direction inference completed\n"
+        "Review the Direction Settings, adjust them if needed, then generate again.\n"
+        f"Forward Axis: {scene.gen_forward_axis}\n"
+        f"Up Axis: {scene.gen_up_axis}\n"
+        f"Right Axis: {scene.gen_right_axis}\n"
+        f"Confidence: {direction_result.confidence:.2f}"
+    )
+    _tag_redraw()
+    return direction_result
+
+
+class GENERATOR_OT_refine_prompt(bpy.types.Operator):
+    bl_label = "Refine Prompt"
+    bl_idname = "generator.refine_prompt"
+
+    def execute(self, context):
+        scene = context.scene
+        try:
+            _start_prompt_refinement_job(scene, context, reset=True)
+        except Exception as error:
+            scene.gen_refinement_status = f"Refinement failed: {error}"
+            scene.gen_refinement_loading = False
+            scene.gen_current_question = ""
+            scene.gen_refined_prompt = ""
+            _tag_redraw()
+            self.report({"ERROR"}, f"Prompt refinement failed: {error}")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "Prompt refinement started")
+        return {"FINISHED"}
+
+
+class GENERATOR_OT_answer_refinement(bpy.types.Operator):
+    bl_label = "Answer Refinement"
+    bl_idname = "generator.answer_refinement"
+
+    answer: bpy.props.StringProperty(default="Skip")
+
+    def execute(self, context):
+        scene = context.scene
+        if scene.gen_refinement_loading:
+            self.report({"WARNING"}, "Prompt refinement is already running")
+            return {"CANCELLED"}
+
+        question = str(scene.gen_current_question or "").strip()
+        if not question:
+            self.report({"WARNING"}, "There is no refinement question to answer")
+            return {"CANCELLED"}
+
+        if scene.gen_refinement_prompt_snapshot != str(scene.gen_prompt or "").strip():
+            scene.gen_refinement_status = "Prompt changed; refine again"
+            scene.gen_refinement_loading = False
+            scene.gen_current_question = ""
+            scene.gen_refined_prompt = ""
+            _set_prompt_refinement_history(scene, [])
+            _tag_redraw()
+            self.report({"WARNING"}, "Prompt changed; run Refine Prompt again")
+            return {"CANCELLED"}
+
+        current_object_name = _resolve_target_object_name(context, scene)
+        snapshot_object_name = str(scene.gen_refinement_object_snapshot or "").strip()
+        if (
+            snapshot_object_name
+            and current_object_name
+            and current_object_name != snapshot_object_name
+        ):
+            scene.gen_refinement_status = "Object changed; refine again"
+            scene.gen_refinement_loading = False
+            scene.gen_current_question = ""
+            scene.gen_refined_prompt = ""
+            _set_prompt_refinement_history(scene, [])
+            _tag_redraw()
+            self.report({"WARNING"}, "Object changed; run Refine Prompt again")
+            return {"CANCELLED"}
+
+        answer = str(self.answer or "Skip").strip().title()
+        if answer not in {"Yes", "No", "Skip"}:
+            self.report({"WARNING"}, "Answer must be Yes, No, or Skip")
+            return {"CANCELLED"}
+
+        history = _get_prompt_refinement_history(scene)
+        history.append({"question": question, "answer": answer})
+        _set_prompt_refinement_history(scene, history)
+        scene.gen_current_question = ""
+
+        try:
+            _start_prompt_refinement_job(scene, context, reset=False)
+        except Exception as error:
+            scene.gen_refinement_status = f"Refinement failed: {error}"
+            scene.gen_refinement_loading = False
+            scene.gen_current_question = ""
+            scene.gen_refined_prompt = ""
+            _tag_redraw()
+            self.report({"ERROR"}, f"Prompt refinement failed: {error}")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "Prompt refinement continuing")
+        return {"FINISHED"}
+
+
+class GENERATOR_OT_infer_directions(bpy.types.Operator):
+    bl_label = "Infer Directions"
+    bl_idname = "generator.infer_directions"
+
+    def execute(self, context):
+        scene = context.scene
+
+        if context.active_object is None:
+            self.report({"WARNING"}, "Select an object before inferring directions")
+            return {"CANCELLED"}
+
+        object_name = _resolve_target_object_name(context, scene)
+        if not object_name:
+            self.report({"WARNING"}, "Select a valid object before inferring directions")
+            return {"CANCELLED"}
+
+        try:
+            _run_direction_inference_into_scene(context, object_name)
+        except Exception as error:
+            scene.gen_direction_error = str(error)
+            scene.gen_direction_inference_ready = False
+            scene.gen_output = f"Status: Direction inference failed\n{error}"
+            print(f"[Generator] Direction inference failed: {error}")
+            print(traceback.format_exc())
+            self.report({"WARNING"}, f"Direction inference failed: {error}")
+            _tag_redraw()
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "Direction inference completed")
+        return {"FINISHED"}
+
+
 class GENERATOR_OT_generate(bpy.types.Operator):
-    bl_label = "Generate"
+    bl_label = "Generate Preview"
     bl_idname = "generator.generate"
 
     def execute(self, context):
+        scene = context.scene
+
+        if getattr(scene, "gen_action_mode", "ANIMATE") == "RIG":
+            if scene.unirig_running:
+                self.report({"WARNING"}, "UniRig is already running.")
+                return {"CANCELLED"}
+
+            object_name = _resolve_target_object_name(context, scene)
+
+            if not object_name or object_name == "__NONE__":
+                self.report({"ERROR"}, "Select a mesh object to rig.")
+                return {"CANCELLED"}
+
+            target_obj = bpy.data.objects.get(object_name)
+            if target_obj is None:
+                self.report({"ERROR"}, f"Object `{object_name}` was not found.")
+                return {"CANCELLED"}
+
+            if target_obj.type != "MESH":
+                self.report({"ERROR"}, f"Object `{object_name}` is not a mesh.")
+                return {"CANCELLED"}
+
+            try:
+                from .comfy_unirig_client import run_unirig_for_object
+
+                def _set_unirig_status(message):
+                    scene.unirig_status = message
+                    _tag_redraw()
+
+                def _finish_unirig(success, message):
+                    scene.unirig_running = False
+                    scene.unirig_status = (
+                        f"[UniRig] Completed: {message}"
+                        if success
+                        else f"[UniRig] Failed: {message}"
+                    )
+                    _tag_redraw()
+
+                scene.unirig_running = True
+                scene.unirig_status = "[UniRig] Starting..."
+                run_unirig_for_object(
+                    object_name,
+                    scene.unirig_output_name.strip(),
+                    scene_name=scene.name,
+                    skeleton_template=scene.unirig_skeleton_template,
+                    target_face_count=scene.unirig_target_face_count,
+                    add_subdivision=scene.unirig_add_subdivision,
+                    status_callback=_set_unirig_status,
+                    finished_callback=_finish_unirig,
+                )
+            except Exception as error:
+                scene.unirig_running = False
+                scene.unirig_status = f"[UniRig] Failed: {error}"
+                self.report({"ERROR"}, str(error))
+                return {"CANCELLED"}
+
+            self.report({"INFO"}, "UniRig started. Check Blender console for progress.")
+            return {"FINISHED"}
+
+        from . import preview_manager
         from .SceneParser import SceneParser
 
-        scene = context.scene
-        user_prompt = scene.gen_prompt
+        original_prompt = str(scene.gen_prompt or "").strip()
+        execution_mode = getattr(scene, "gen_execution_mode", "REFINEMENT")
+        if execution_mode not in {"REFINEMENT", "DIRECT"}:
+            execution_mode = "REFINEMENT"
 
-        if user_prompt == "Write your prompt here...":
+        if not original_prompt or original_prompt == "Write your prompt here...":
             self.report({"WARNING"}, "Please enter a real prompt")
+            return {"CANCELLED"}
+
+        if scene.gen_refinement_loading:
+            self.report({"WARNING"}, "Wait for Prompt Refinement to finish")
             return {"CANCELLED"}
 
         if context.active_object is None:
@@ -514,48 +1682,183 @@ class GENERATOR_OT_generate(bpy.types.Operator):
             self.report({"WARNING"}, "Select a valid object before generating")
             return {"CANCELLED"}
 
+        if scene.gen_current_question:
+            question_prompt = str(scene.gen_refinement_prompt_snapshot or "").strip()
+            question_object = str(scene.gen_refinement_object_snapshot or "").strip()
+            if question_prompt == original_prompt and question_object == object_name:
+                self.report({"WARNING"}, "Answer or skip the current Prompt Refinement question")
+                return {"CANCELLED"}
+            scene.gen_current_question = ""
+            scene.gen_refinement_status = "Prompt or object changed; refine again"
+            scene.gen_refined_prompt = ""
+
+        original_armature = bpy.data.objects.get(object_name)
+        if original_armature is None:
+            self.report({"ERROR"}, f"Armature `{object_name}` was not found")
+            return {"CANCELLED"}
+        if getattr(original_armature, "type", None) != "ARMATURE":
+            self.report({"ERROR"}, f"Object `{object_name}` is not an armature")
+            return {"CANCELLED"}
+
+        needs_direction_inference = (
+            scene.gen_auto_infer_directions
+            and (
+                not scene.gen_direction_inference_ready
+                or scene.gen_direction_inferred_object_name != object_name
+            )
+        )
+        if needs_direction_inference:
+            try:
+                _run_direction_inference_into_scene(context, object_name)
+            except Exception as error:
+                scene.gen_direction_error = str(error)
+                scene.gen_direction_inference_ready = False
+                scene.gen_output = f"Status: Direction inference failed\n{error}"
+                print(f"[Generator] Direction inference failed: {error}")
+                print(traceback.format_exc())
+                self.report({"WARNING"}, f"Direction inference failed: {error}")
+                _tag_redraw()
+                return {"CANCELLED"}
+
+            self.report({"INFO"}, "Direction inference completed; review settings before generating")
+            return {"FINISHED"}
+
+        direction_validation_error = _validate_scene_direction_settings(scene)
+        if direction_validation_error:
+            scene.gen_direction_error = direction_validation_error
+            scene.gen_output = f"Status: Direction settings invalid\n{direction_validation_error}"
+            self.report({"ERROR"}, direction_validation_error)
+            _tag_redraw()
+            return {"CANCELLED"}
+        scene.gen_direction_error = ""
+        direction_settings = _direction_settings_from_scene(scene)
+        user_prompt, clarification_history, used_refined_prompt = _get_generation_prompt_and_history(
+            scene,
+            object_name,
+        )
+
         print(f"[Generator] Starting pipeline for object `{object_name}`.")
-        print(f"[Generator] Prompt: {user_prompt}")
+        print(f"[Generator] Execution mode: {execution_mode}.")
+        print(f"[Generator] Original prompt: {original_prompt}")
+        if used_refined_prompt:
+            print(f"[Generator] Final refined prompt sent to planner: {user_prompt}")
+            print(
+                "[Generator] Clarification history: "
+                f"{_format_clarification_history(clarification_history)}"
+            )
+        else:
+            print(f"[Generator] Prompt: {user_prompt}")
 
         parser = SceneParser(precision=1)
 
         try:
+            scene.gen_output = "Status: Parsing scene"
+            _tag_redraw()
             print("[Generator] Stage 1: Parsing initial scene state on main thread.")
             object_json = parser.generate_object_json([object_name])
+            object_json = _append_direction_context(object_json, direction_settings)
             print("[Generator] Initial scene parse completed.")
         except Exception as error:
             print(f"[Generator] Initial scene parse failed: {error}")
             self.report({"ERROR"}, f"Scene parse failed: {error}")
             return {"CANCELLED"}
 
+        try:
+            print("[Preview] Preparing non-destructive preview resources.")
+            preview_state = preview_manager.prepare_preview(
+                context,
+                original_armature,
+                owner_scene=scene,
+            )
+            print(
+                "[Preview] Generation target is preview armature "
+                f"`{preview_state['preview_armature_name']}`."
+            )
+        except Exception as error:
+            print(f"[Preview] Preview setup failed: {error}")
+            print(traceback.format_exc())
+            self.report({"ERROR"}, f"Preview setup failed: {error}")
+            return {"CANCELLED"}
+
         request_queue = queue.Queue()
         result_queue = queue.Queue()
+        if execution_mode == "REFINEMENT":
+            worker_target = _refinement_worker
+            worker_args = (
+                request_queue,
+                result_queue,
+                object_name,
+                object_json,
+                user_prompt,
+                preview_state["preview_armature_name"],
+            )
+            worker_name = "GradRefinementWorker"
+            initial_total_steps = 4
+            initial_waiting_for_llm = False
+        else:
+            worker_target = _generation_worker
+            worker_args = (
+                request_queue,
+                result_queue,
+                object_name,
+                object_json,
+                user_prompt,
+            )
+            worker_name = "GradDirectGenerationWorker"
+            initial_total_steps = 0
+            initial_waiting_for_llm = True
+
         worker_thread = threading.Thread(
-            target=_generation_worker,
-            args=(request_queue, result_queue, object_name, object_json, user_prompt),
-            name="GradGeneratorWorker",
+            target=worker_target,
+            args=worker_args,
+            name=worker_name,
             daemon=True,
         )
 
         job_state = {
             "scene": scene,
+            "mode": execution_mode,
             "object_name": object_name,
+            "preview_collection_name": preview_state["preview_collection_name"],
+            "preview_armature_name": preview_state["preview_armature_name"],
+            "preview_action_name": preview_state["preview_action_name"],
+            "preview_ready": True,
+            "user_prompt": user_prompt,
             "request_queue": request_queue,
             "result_queue": result_queue,
             "thread": worker_thread,
             "parser": parser,
+            "direction_settings": direction_settings,
             "executor": BlenderExecutor(),
             "steps": [],
             "current_step": 0,
-            "total_steps": 0,
+            "total_steps": initial_total_steps,
             "current_instruction": "",
             "status": "Generating plan",
-            "status_base": "",
+            "status_base": "Generating plan" if initial_waiting_for_llm else "",
             "status_dots": 0,
-            "waiting_for_llm": False,
+            "waiting_for_llm": initial_waiting_for_llm,
             "previous_animation": None,
+            "plan_history": [],
+            "all_outputs": [],
+            "final_animation": "",
+            "final_plan": "",
+            "final_keyframes": "",
+            "final_feedback": None,
             "plan_text": "",
-            "step_logs": [],
+            "step_logs": [
+                (
+                    "Direction settings: "
+                    f"forward={direction_settings['forward_axis']}, "
+                    f"up={direction_settings['up_axis']}, "
+                    f"right={direction_settings['right_axis']}"
+                ),
+                (
+                    "Prompt refinement: refined prompt applied."
+                    if used_refined_prompt
+                    else "Prompt refinement: not used."
+                ),
+            ],
             "plan_ready": False,
         }
 
@@ -571,6 +1874,63 @@ class GENERATOR_OT_generate(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class GENERATOR_OT_accept_preview(bpy.types.Operator):
+    bl_label = "Accept Preview"
+    bl_idname = "generator.accept_preview"
+
+    def execute(self, context):
+        from . import preview_manager
+
+        scene = context.scene
+        if scene.gen_loading:
+            self.report({"WARNING"}, "Wait for generation to finish before accepting the preview")
+            return {"CANCELLED"}
+
+        if not _scene_has_preview(scene):
+            self.report({"WARNING"}, "No preview is available to accept")
+            return {"CANCELLED"}
+
+        try:
+            preview_manager.accept_preview(context, owner_scene=scene)
+        except Exception as error:
+            print(f"[Preview] Accept preview failed: {error}")
+            print(traceback.format_exc())
+            self.report({"ERROR"}, f"Accept preview failed: {error}")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "Preview accepted")
+        return {"FINISHED"}
+
+
+class GENERATOR_OT_cancel_preview(bpy.types.Operator):
+    bl_label = "Cancel Preview"
+    bl_idname = "generator.cancel_preview"
+
+    def execute(self, context):
+        from . import preview_manager
+
+        scene = context.scene
+        existing_job = _get_generation_job(scene)
+        if existing_job is not None:
+            print("[Preview] Cancel requested while generation job is active.")
+            _finalize_generation(scene, existing_job)
+
+        if not _scene_has_preview(scene):
+            self.report({"WARNING"}, "No preview is available to cancel")
+            return {"CANCELLED"}
+
+        try:
+            preview_manager.cancel_preview(context, owner_scene=scene)
+        except Exception as error:
+            print(f"[Preview] Cancel preview failed: {error}")
+            print(traceback.format_exc())
+            self.report({"ERROR"}, f"Cancel preview failed: {error}")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "Preview canceled")
+        return {"FINISHED"}
+
+
 class GENERATOR_PT_panel(bpy.types.Panel):
     bl_label = "Generator"
     bl_idname = "GENERATOR_PT_panel"
@@ -583,10 +1943,106 @@ class GENERATOR_PT_panel(bpy.types.Panel):
         scene = context.scene
 
         box = layout.box()
+        box.label(text="Mode", icon="TOOL_SETTINGS")
+        box.prop(scene, "gen_action_mode", text="")
+        box.prop(scene, "gen_mode", text="Rig" if scene.gen_action_mode == "ANIMATE" else "Mesh")
+
+        if scene.gen_action_mode == "RIG":
+            rig_box = layout.box()
+            rig_box.label(text="ComfyUI UniRig", icon="ARMATURE_DATA")
+            rig_box.prop(scene, "unirig_output_name")
+            rig_box.prop(scene, "unirig_skeleton_template")
+            rig_box.prop(scene, "unirig_target_face_count")
+            rig_box.prop(scene, "unirig_add_subdivision")
+            rig_button_row = rig_box.row()
+            rig_button_row.enabled = not scene.unirig_running
+            rig_button_row.operator("generator.generate", text="Rig Object with UniRig", icon="OUTLINER_OB_ARMATURE")
+            if scene.unirig_status:
+                rig_box.separator(factor=0.5)
+                for line in textwrap.wrap(scene.unirig_status, width=45):
+                    rig_box.label(text=line)
+            return
+
+        box = layout.box()
         box.label(text="Prompt", icon="TEXT")
         box.prop(scene, "gen_prompt", text="")
+        box.prop(scene, "gen_execution_mode")
         box.prop(scene, "gen_mode")
-        box.operator("generator.generate", icon="PLAY")
+        refine_row = box.row()
+        refine_row.enabled = not scene.gen_refinement_loading and not scene.gen_loading
+        refine_row.operator("generator.refine_prompt", text="Refine Prompt", icon="FILE_REFRESH")
+
+        if scene.gen_refinement_status:
+            status_text = f"Refinement: {scene.gen_refinement_status}"
+            for line in textwrap.wrap(status_text, width=45):
+                box.label(text=line)
+
+        if scene.gen_refinement_loading:
+            box.label(text="Refining prompt...")
+
+        if scene.gen_current_question:
+            box.separator(factor=0.5)
+            box.label(text="Current Question", icon="QUESTION")
+            for line in textwrap.wrap(scene.gen_current_question, width=45):
+                box.label(text=line)
+
+            answer_row = box.row(align=True)
+            yes_op = answer_row.operator("generator.answer_refinement", text="Yes")
+            yes_op.answer = "Yes"
+            no_op = answer_row.operator("generator.answer_refinement", text="No")
+            no_op.answer = "No"
+            skip_op = answer_row.operator("generator.answer_refinement", text="Skip")
+            skip_op.answer = "Skip"
+
+        clarification_history = _get_prompt_refinement_history(scene)
+        if clarification_history:
+            box.separator(factor=0.5)
+            box.label(text="Clarification History")
+            for item in clarification_history:
+                history_line = f"Q: {item['question']} A: {item['answer']}"
+                for line in textwrap.wrap(history_line, width=45):
+                    box.label(text=line)
+
+        if scene.gen_refined_prompt:
+            box.separator(factor=0.5)
+            box.label(text="Final Refined Prompt")
+            for paragraph in scene.gen_refined_prompt.split("\n"):
+                if not paragraph.strip():
+                    continue
+                for line in textwrap.wrap(paragraph, width=45):
+                    box.label(text=line)
+
+        direction_box = layout.box()
+        direction_box.label(text="Direction Settings", icon="ORIENTATION_LOCAL")
+        direction_box.prop(scene, "gen_auto_infer_directions")
+        if scene.gen_auto_infer_directions:
+            infer_row = direction_box.row()
+            infer_row.enabled = not scene.gen_loading
+            infer_row.operator("generator.infer_directions", text="Infer Directions", icon="VIEW_CAMERA")
+        direction_box.prop(scene, "gen_forward_axis")
+        direction_box.prop(scene, "gen_up_axis")
+        direction_box.prop(scene, "gen_right_axis")
+
+        direction_error = scene.gen_direction_error or _validate_scene_direction_settings(scene)
+        if direction_error:
+            error_col = direction_box.column()
+            error_col.alert = True
+            for line in textwrap.wrap(direction_error, width=45):
+                error_col.label(text=line, icon="ERROR")
+
+        action_box = layout.box()
+        generate_row = action_box.row()
+        generate_row.enabled = not (direction_error and not scene.gen_auto_infer_directions)
+        generate_row.operator("generator.generate", text="Generate Preview", icon="PLAY")
+
+        preview_available = _scene_has_preview(scene)
+        accept_row = action_box.row()
+        accept_row.enabled = preview_available and not scene.gen_loading
+        accept_row.operator("generator.accept_preview", text="Accept Preview", icon="CHECKMARK")
+
+        cancel_row = action_box.row()
+        cancel_row.enabled = preview_available
+        cancel_row.operator("generator.cancel_preview", text="Cancel Preview", icon="CANCEL")
 
         result_box = layout.box()
         result_box.label(text="Result", icon="CONSOLE")
@@ -611,10 +2067,74 @@ class GENERATOR_PT_panel(bpy.types.Panel):
             result_box.label(text="Waiting for generation...")
 
 
+class OBJECT_OT_unirig_comfy_api(bpy.types.Operator):
+    bl_idname = "object.unirig_comfy_api"
+    bl_label = "Rig Object with UniRig"
+    bl_description = "Export selected mesh to ComfyUI UniRig, generate rigged FBX, and import it back"
+
+    def execute(self, context):
+        scene = context.scene
+        object_name = scene.unirig_object_name.strip()
+
+        if not object_name and context.object is not None:
+            object_name = context.object.name
+
+        if not object_name:
+            self.report({"ERROR"}, "Write object name or select a mesh object.")
+            return {"CANCELLED"}
+
+        output_name = scene.unirig_output_name.strip()
+
+        try:
+            from .comfy_unirig_client import run_unirig_for_object
+
+            run_unirig_for_object(
+                object_name,
+                output_name,
+                scene_name=scene.name,
+                skeleton_template=scene.unirig_skeleton_template,
+                target_face_count=scene.unirig_target_face_count,
+                add_subdivision=scene.unirig_add_subdivision,
+            )
+        except Exception as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "UniRig started. Check Blender console for progress.")
+        return {"FINISHED"}
+
+
 classes = [
+    GENERATOR_OT_refine_prompt,
+    GENERATOR_OT_answer_refinement,
+    GENERATOR_OT_infer_directions,
     GENERATOR_OT_generate,
+    GENERATOR_OT_accept_preview,
+    GENERATOR_OT_cancel_preview,
     GENERATOR_PT_panel,
+    OBJECT_OT_unirig_comfy_api,
 ]
+
+
+def _on_auto_infer_directions_changed(self, context):
+    self.gen_direction_inference_ready = False
+    self.gen_direction_inferred_object_name = ""
+    if not self.gen_auto_infer_directions:
+        self.gen_direction_error = _validate_scene_direction_settings(self)
+
+
+def _on_direction_axis_changed(self, context):
+    self.gen_direction_error = _validate_scene_direction_settings(self)
+
+
+def _on_action_mode_changed(self, context):
+    try:
+        items = dropdown_items(self, context)
+        if items:
+            first_value = items[0][0]
+            self.gen_mode = first_value
+    except Exception as error:
+        print(f"[Generator] Failed to update object dropdown after mode change: {error}")
 
 
 def register():
@@ -627,10 +2147,77 @@ def register():
         default="Write your prompt here...",
     )
 
+    bpy.types.Scene.gen_action_mode = bpy.props.EnumProperty(
+        name="Mode",
+        description="Choose whether to animate an existing rig or rig a mesh with UniRig",
+        items=[
+            ("ANIMATE", "Animate", "Animate an existing rig / armature"),
+            ("RIG", "Rig", "Rig a mesh with UniRig"),
+        ],
+        default="ANIMATE",
+        update=_on_action_mode_changed,
+    )
+
     bpy.types.Scene.gen_mode = bpy.props.EnumProperty(
         name="Object",
         description="Select Object",
         items=dropdown_items,
+    )
+
+    bpy.types.Scene.gen_execution_mode = bpy.props.EnumProperty(
+        name="Execution Mode",
+        description="Choose whether to refine generated motion or run the direct generation pipeline",
+        items=_EXECUTION_MODE_ITEMS,
+        default="REFINEMENT",
+    )
+
+    bpy.types.Scene.gen_auto_infer_directions = bpy.props.BoolProperty(
+        name="Automatically Infer Directions",
+        description="Use the vision direction helper to populate the direction controls",
+        default=False,
+        update=_on_auto_infer_directions_changed,
+    )
+
+    bpy.types.Scene.gen_forward_axis = bpy.props.EnumProperty(
+        name="Forward Axis",
+        description="Semantic forward axis for the selected object",
+        items=_AXIS_ENUM_ITEMS,
+        default="+Y",
+        update=_on_direction_axis_changed,
+    )
+
+    bpy.types.Scene.gen_up_axis = bpy.props.EnumProperty(
+        name="Up Axis",
+        description="Semantic up axis for the selected object",
+        items=_AXIS_ENUM_ITEMS,
+        default="+Z",
+        update=_on_direction_axis_changed,
+    )
+
+    bpy.types.Scene.gen_right_axis = bpy.props.EnumProperty(
+        name="Right Axis",
+        description="Semantic right axis for the selected object",
+        items=_AXIS_ENUM_ITEMS,
+        default="+X",
+        update=_on_direction_axis_changed,
+    )
+
+    bpy.types.Scene.gen_direction_error = bpy.props.StringProperty(
+        name="Direction Error",
+        description="Direction settings validation or inference error",
+        default="",
+    )
+
+    bpy.types.Scene.gen_direction_inference_ready = bpy.props.BoolProperty(
+        name="Direction Inference Ready",
+        description="True after AI inference has populated the direction controls for review",
+        default=False,
+    )
+
+    bpy.types.Scene.gen_direction_inferred_object_name = bpy.props.StringProperty(
+        name="Direction Inferred Object",
+        description="Object name used for the last AI direction inference",
+        default="",
     )
 
     bpy.types.Scene.gen_output = bpy.props.StringProperty(
@@ -645,12 +2232,180 @@ def register():
         default=False,
     )
 
+    bpy.types.Scene.gen_current_question = bpy.props.StringProperty(
+        name="Current Question",
+        description="Current prompt refinement question",
+        default="",
+    )
+
+    bpy.types.Scene.gen_refinement_history = bpy.props.StringProperty(
+        name="Clarification History",
+        description="Prompt refinement clarification history",
+        default="[]",
+    )
+
+    bpy.types.Scene.gen_refinement_status = bpy.props.StringProperty(
+        name="Refinement Status",
+        description="Prompt refinement status",
+        default="Not refined",
+    )
+
+    bpy.types.Scene.gen_refinement_loading = bpy.props.BoolProperty(
+        name="Refining",
+        description="True while prompt refinement is running",
+        default=False,
+    )
+
+    bpy.types.Scene.gen_refined_prompt = bpy.props.StringProperty(
+        name="Final Refined Prompt",
+        description="Final prompt sent to the planner after refinement",
+        default="",
+    )
+
+    bpy.types.Scene.gen_refinement_prompt_snapshot = bpy.props.StringProperty(
+        name="Refinement Prompt Snapshot",
+        description="Original prompt text used for the current refined prompt",
+        default="",
+    )
+
+    bpy.types.Scene.gen_refinement_object_snapshot = bpy.props.StringProperty(
+        name="Refinement Object Snapshot",
+        description="Object name used for the current prompt refinement",
+        default="",
+    )
+
+    bpy.types.Scene.gen_refinement_object_json_snapshot = bpy.props.StringProperty(
+        name="Refinement Object JSON Snapshot",
+        description="Object JSON rig hierarchy used for the current prompt refinement",
+        default="",
+    )
+
+    bpy.types.Scene.preview_collection_name = bpy.props.StringProperty(
+        name="Preview Collection",
+        description="Name of the active AI preview collection",
+        default="",
+    )
+
+    bpy.types.Scene.preview_armature_name = bpy.props.StringProperty(
+        name="Preview Armature",
+        description="Name of the active AI preview armature",
+        default="",
+    )
+
+    bpy.types.Scene.preview_action_name = bpy.props.StringProperty(
+        name="Preview Action",
+        description="Name of the active AI preview action",
+        default="",
+    )
+
+    bpy.types.Scene.preview_original_armature_name = bpy.props.StringProperty(
+        name="Original Armature",
+        description="Name of the original armature for the active preview",
+        default="",
+    )
+
+    bpy.types.Scene.preview_active = bpy.props.BoolProperty(
+        name="Preview Active",
+        description="True while a generated preview is available",
+        default=False,
+    )
+
+    bpy.types.Scene.unirig_object_name = bpy.props.StringProperty(
+        name="Object Name",
+        description="Mesh object to send to UniRig. Leave empty to use selected object.",
+        default="",
+    )
+
+    bpy.types.Scene.unirig_output_name = bpy.props.StringProperty(
+        name="Output FBX Name",
+        description="Generated FBX name. Leave empty to auto-generate.",
+        default="",
+    )
+
+    bpy.types.Scene.unirig_skeleton_template = bpy.props.EnumProperty(
+        name="Skeleton Template",
+        description="Choose UniRig skeleton template",
+        items=[
+            (
+                "articulationxl",
+                "ArticulationXL (Non-Humanoid)",
+                "Best for animals, creatures, props, and non-humanoid objects",
+            ),
+            (
+                "mixamo",
+                "Mixamo (Humanoid)",
+                "Best for human or humanoid characters",
+            ),
+        ],
+        default="articulationxl",
+    )
+
+    bpy.types.Scene.unirig_target_face_count = bpy.props.IntProperty(
+        name="Target Face Count",
+        description="Target mesh face count used by UniRig. Higher values preserve smoother geometry but may take longer.",
+        default=10000,
+        min=1000,
+        max=500000,
+    )
+
+    bpy.types.Scene.unirig_add_subdivision = bpy.props.BoolProperty(
+        name="Add Smooth Subdivision",
+        description="Add a non-destructive subdivision modifier to the imported UniRig mesh",
+        default=True,
+    )
+
+    bpy.types.Scene.unirig_running = bpy.props.BoolProperty(
+        name="UniRig Running",
+        description="True while UniRig is exporting or waiting for ComfyUI",
+        default=False,
+    )
+
+    bpy.types.Scene.unirig_status = bpy.props.StringProperty(
+        name="UniRig Status",
+        description="Current UniRig export and ComfyUI status",
+        default="",
+    )
+
 
 def unregister():
-    del bpy.types.Scene.gen_prompt
-    del bpy.types.Scene.gen_mode
-    del bpy.types.Scene.gen_output
-    del bpy.types.Scene.gen_loading
+    for property_name in (
+        "unirig_output_name",
+        "unirig_skeleton_template",
+        "unirig_target_face_count",
+        "unirig_add_subdivision",
+        "unirig_running",
+        "unirig_status",
+        "unirig_object_name",
+        "preview_active",
+        "preview_original_armature_name",
+        "preview_action_name",
+        "preview_armature_name",
+        "preview_scene_name",
+        "preview_collection_name",
+        "gen_execution_mode",
+        "gen_direction_inferred_object_name",
+        "gen_direction_inference_ready",
+        "gen_direction_error",
+        "gen_right_axis",
+        "gen_up_axis",
+        "gen_forward_axis",
+        "gen_auto_infer_directions",
+        "gen_prompt",
+        "gen_action_mode",
+        "gen_mode",
+        "gen_output",
+        "gen_loading",
+        "gen_current_question",
+        "gen_refinement_history",
+        "gen_refinement_status",
+        "gen_refinement_loading",
+        "gen_refined_prompt",
+        "gen_refinement_prompt_snapshot",
+        "gen_refinement_object_snapshot",
+        "gen_refinement_object_json_snapshot",
+    ):
+        if hasattr(bpy.types.Scene, property_name):
+            delattr(bpy.types.Scene, property_name)
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

@@ -1,0 +1,9 @@
+langchain
+langchain-core
+langchain-google-genai
+langchain-nvidia-ai-endpoints
+langchain-openai
+numpy
+opencv-python
+pydantic
+python-dotenv

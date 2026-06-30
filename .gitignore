@@ -20,7 +20,6 @@ bvh*
 HumanML3D/
 stats/
 *.bvh
-
 # Ignore archives everywhere
 *.zip
 *.tar

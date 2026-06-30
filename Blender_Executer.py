@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pprint import pprint
-from typing import Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple, Union
 import re
+import math
 
 try:
     import bpy as _bpy  # type: ignore
@@ -15,6 +16,210 @@ except ModuleNotFoundError:
 
 QuaternionXYZW = Tuple[float, float, float, float]
 VectorXYZ = Tuple[float, float, float]
+AnimationRepairCallback = Callable[[str, Sequence[str]], str]
+
+
+_FIRST_PAYLOAD_PATTERN = re.compile(r"^(.*?)(?=,\[|,\()")
+_LOCATION_PATTERN = re.compile(r"\[([^\]]*)\]")
+_ROTATION_PATTERN = re.compile(r"\(([^\)]*)\)")
+_ANY_PAYLOAD_PATTERN = re.compile(r"\[[^\]]*\]|\([^\)]*\)")
+_NUMBER_PATTERN = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def validate_animation_text(animation_text):
+    """Validate raw keyframe-agent animation text before Blender execution."""
+    errors = []
+    lines = _normalize_animation_lines(animation_text)
+
+    if not lines:
+        errors.append("No animation lines were provided.")
+        return {"valid": False, "errors": errors}
+
+    for line_number, line in lines:
+        target_path = _extract_animation_target(line)
+        if target_path is None:
+            errors.append(f"Line {line_number}: Could not parse animation target.")
+        else:
+            _validate_target_path(target_path, line_number, errors)
+
+        location_matches = _LOCATION_PATTERN.findall(line)
+        rotation_matches = _ROTATION_PATTERN.findall(line)
+
+        if not location_matches and not rotation_matches:
+            errors.append(f"Line {line_number}: No keyframe payload found.")
+
+        if location_matches and rotation_matches:
+            errors.append(f"Line {line_number}: Line mixes translation and rotation payloads.")
+
+        for payload_index, payload in enumerate(location_matches, start=1):
+            _validate_payload(
+                payload=payload,
+                expected_size=4,
+                label="Translation",
+                line_number=line_number,
+                payload_index=payload_index,
+                errors=errors,
+            )
+
+        for payload_index, payload in enumerate(rotation_matches, start=1):
+            _validate_payload(
+                payload=payload,
+                expected_size=5,
+                label="Quaternion",
+                line_number=line_number,
+                payload_index=payload_index,
+                errors=errors,
+            )
+
+    return {"valid": len(errors) == 0, "errors": errors}
+
+
+def prepare_animation_text_for_execution(
+    animation_text: str,
+    repair_callback: Optional[AnimationRepairCallback] = None,
+) -> str:
+    validation = validate_animation_text(animation_text)
+    if validation["valid"]:
+        print("[Validator] Validation successful")
+        return str(animation_text or "").strip()
+
+    _log_validation_errors(validation["errors"])
+
+    auto_repaired_text, repaired_count = auto_repair_animation_text(animation_text, validation["errors"])
+    print(f"[Validator] Auto-repaired {repaired_count} errors")
+
+    validation = validate_animation_text(auto_repaired_text)
+    if validation["valid"]:
+        print("[Validator] Validation successful")
+        return auto_repaired_text
+
+    _log_validation_errors(validation["errors"])
+
+    if repair_callback is not None:
+        print("[Validator] Requesting LLM repair")
+        llm_repaired_text = repair_callback(auto_repaired_text, validation["errors"])
+        llm_repaired_text, _ = auto_repair_animation_text(llm_repaired_text, validation["errors"])
+        validation = validate_animation_text(llm_repaired_text)
+        if validation["valid"]:
+            print("[Validator] Validation successful")
+            return llm_repaired_text
+        _log_validation_errors(validation["errors"])
+
+    raise ValueError("Animation validation failed:\n" + "\n".join(validation["errors"]))
+
+
+def auto_repair_animation_text(animation_text: str, errors: Optional[Sequence[str]] = None) -> Tuple[str, int]:
+    before_error_count = len(errors) if errors is not None else len(validate_animation_text(animation_text)["errors"])
+    text = str(animation_text or "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"^\s*```[a-zA-Z0-9_+-]*\s*", "", text.strip())
+    text = re.sub(r"\s*```\s*$", "", text)
+    text = re.sub(r"[ \t]+", " ", text)
+
+    repaired_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        payloads = _ANY_PAYLOAD_PATTERN.findall(line)
+        if not payloads:
+            continue
+
+        target_path = _extract_animation_target(line)
+        if target_path is None:
+            repaired_lines.append(line)
+            continue
+
+        location_payloads = [payload for payload in payloads if payload.startswith("[")]
+        rotation_payloads = [payload for payload in payloads if payload.startswith("(")]
+
+        if location_payloads:
+            repaired_lines.append(",".join([target_path] + location_payloads))
+        if rotation_payloads:
+            repaired_lines.append(",".join([target_path] + rotation_payloads))
+
+    repaired_text = "\n".join(repaired_lines)
+    after_error_count = len(validate_animation_text(repaired_text)["errors"])
+    repaired_count = max(0, before_error_count - after_error_count)
+    return repaired_text, repaired_count
+
+
+def _normalize_animation_lines(animation_text: str) -> List[Tuple[int, str]]:
+    return [
+        (index, line.strip())
+        for index, line in enumerate(str(animation_text or "").splitlines(), start=1)
+        if line.strip()
+    ]
+
+
+def _extract_animation_target(line: str) -> Optional[str]:
+    match = _FIRST_PAYLOAD_PATTERN.match(line.strip())
+    if match is None:
+        return None
+    return match.group(1).rstrip(", ").strip()
+
+
+def _validate_target_path(target_path: str, line_number: int, errors: List[str]) -> None:
+    if not target_path:
+        errors.append(f"Line {line_number}: Animation target path is empty.")
+        return
+
+    empty_parts = [part for part in target_path.split("/") if not part.strip()]
+    if empty_parts:
+        errors.append(f"Line {line_number}: Empty joint name in target path `{target_path}`.")
+
+
+def _validate_payload(
+    payload: str,
+    expected_size: int,
+    label: str,
+    line_number: int,
+    payload_index: int,
+    errors: List[str],
+) -> None:
+    parts = [part.strip() for part in payload.split(",")]
+    if len(parts) != expected_size:
+        errors.append(
+            f"Line {line_number}: {label} keyframe {payload_index} has {len(parts)} values; expected {expected_size}."
+        )
+        if len(parts) == expected_size - 1 or not parts or not parts[0]:
+            errors.append(f"Line {line_number}: {label} keyframe {payload_index} is missing a timestamp.")
+
+    if parts and not parts[0]:
+        errors.append(f"Line {line_number}: {label} keyframe {payload_index} is missing a timestamp.")
+
+    for value_index, part in enumerate(parts, start=1):
+        if not part:
+            errors.append(
+                f"Line {line_number}: {label} keyframe {payload_index} value {value_index} is empty."
+            )
+            continue
+
+        if _NUMBER_PATTERN.fullmatch(part) is None:
+            errors.append(
+                f"Line {line_number}: {label} keyframe {payload_index} value `{part}` is not numeric."
+            )
+            continue
+
+        try:
+            number = float(part)
+        except ValueError:
+            errors.append(
+                f"Line {line_number}: {label} keyframe {payload_index} value `{part}` is not numeric."
+            )
+            continue
+
+        if not math.isfinite(number):
+            errors.append(
+                f"Line {line_number}: {label} keyframe {payload_index} value `{part}` is not finite."
+            )
+
+
+def _log_validation_errors(errors: Sequence[str]) -> None:
+    print(f"[Validator] Found {len(errors)} errors")
+    for error in errors:
+        print(f"[Validator] {error}")
 
 
 @dataclass(frozen=True)
@@ -65,10 +270,12 @@ class BlenderExecutor:
         bpy_module=None,
         fps: Optional[float] = None,
         frame_start: Optional[float] = None,
+        animation_repairer: Optional[AnimationRepairCallback] = None,
     ) -> None:
         self.bpy = _bpy if bpy_module is None else bpy_module
         self.fps = fps
         self.frame_start = frame_start
+        self.animation_repairer = animation_repairer
 
     @property
     def blender_available(self) -> bool:
@@ -122,6 +329,10 @@ class BlenderExecutor:
         frame_start: Optional[float] = None,
         clear_existing_action: bool = False,
     ) -> ParsedAnimation:
+        output_text = prepare_animation_text_for_execution(
+            output_text,
+            repair_callback=self.animation_repairer,
+        )
         return self.execute(
             output=output_text,
             armature_object=armature_object,
@@ -230,6 +441,24 @@ class BlenderExecutor:
             armature.animation_data.action = self.bpy.data.actions.new(name=action_name)
 
     def _resolve_target(self, armature, track: AnimationTrack):
+        # Find the rig's root bone (bone with no parent)
+        root_bone = next(
+            (pose_bone for pose_bone in armature.pose.bones if pose_bone.parent is None),
+            None,
+        )
+
+        if root_bone is None:
+            raise RuntimeError(f"Armature `{armature.name}` has no root bone.")
+
+        # If this is a translation track targeting the root bone,
+        # move the armature object instead.
+        if (
+            track.channel == "location"
+            and track.target_name == root_bone.name
+        ):
+            return armature
+
+        # A path with no bone name also targets the armature.
         if "/" not in track.target_path:
             return armature
 
@@ -237,8 +466,10 @@ class BlenderExecutor:
         pose_bone = armature.pose.bones.get(bone_name)
         if pose_bone is None:
             raise KeyError(
-                f"Pose bone `{bone_name}` was not found on armature `{armature.name}` for track `{track.target_path}`."
+                f"Pose bone `{bone_name}` was not found on armature "
+                f"`{armature.name}` for track `{track.target_path}`."
             )
+
         return pose_bone
 
     def _apply_track(self, target, track: AnimationTrack, fps: float, frame_start: float) -> None:
@@ -267,9 +498,7 @@ class BlenderExecutor:
                 if root_bone is not None:
                     if Vector is None:
                         raise RuntimeError("mathutils.Vector is unavailable; run this inside Blender.")
-                    local_vec = Vector(keyframe.values)
-                    world_vec = root_bone.matrix.to_3x3() @ local_vec
-                    target.location = world_vec
+                    target.location = keyframe.values
                 else:
                     target.location = keyframe.values
                 target.keyframe_insert(
