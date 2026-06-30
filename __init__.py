@@ -9,7 +9,6 @@ import traceback
 import bpy  # type: ignore
 
 from .Blender_Executer import BlenderExecutor
-from .planner_agent import run_llm
 
 bl_info = {
     "name": "Generator Panel",
@@ -47,11 +46,20 @@ _EXECUTION_MODE_ITEMS = (
 
 
 def dropdown_items(self, context):
+    scene = context.scene
+    action_mode = getattr(scene, "gen_action_mode", "ANIMATE")
+    wanted_type = "MESH" if action_mode == "RIG" else "ARMATURE"
+
     items = []
 
     for obj in context.scene.objects:
-        if obj.type == "ARMATURE":
+        if obj.type == wanted_type:
             items.append((obj.name, obj.name, ""))
+
+    if not items:
+        if wanted_type == "MESH":
+            return [("__NONE__", "No mesh objects found", "")]
+        return [("__NONE__", "No armatures found", "")]
 
     return items
 
@@ -351,6 +359,8 @@ def _append_direction_context(object_json, direction_settings):
 
 def _generation_worker(request_queue, result_queue, object_name, object_json, prompt):
     try:
+        from .planner_agent import run_llm
+
         print(f"[Generator] Worker started for object `{object_name}`.")
         print("[Generator] Stage 2: Generating animation plan in background thread.")
         animation_plan = run_llm(object_name, object_json, prompt)
@@ -828,8 +838,9 @@ def _register_generation_timer(scene):
 
 
 def _resolve_target_object_name(context, scene):
-    if getattr(scene, "gen_mode", ""):
-        return scene.gen_mode
+    selected_name = getattr(scene, "gen_mode", "")
+    if selected_name and selected_name != "__NONE__":
+        return selected_name
     if context.active_object is not None:
         return context.active_object.name
     return ""
@@ -849,6 +860,7 @@ def run_with_refinement(
 ):
     from .SceneParser import SceneParser
     from .critic_agent import evaluate_motion
+    from .planner_agent import run_llm
     from .refinement import generate_keyframes_for_plan, refine
     from .skeleton_recorder import extract_skeleton_frames
 
@@ -1146,10 +1158,68 @@ class GENERATOR_OT_generate(bpy.types.Operator):
     bl_idname = "generator.generate"
 
     def execute(self, context):
+        scene = context.scene
+
+        if getattr(scene, "gen_action_mode", "ANIMATE") == "RIG":
+            if scene.unirig_running:
+                self.report({"WARNING"}, "UniRig is already running.")
+                return {"CANCELLED"}
+
+            object_name = _resolve_target_object_name(context, scene)
+
+            if not object_name or object_name == "__NONE__":
+                self.report({"ERROR"}, "Select a mesh object to rig.")
+                return {"CANCELLED"}
+
+            target_obj = bpy.data.objects.get(object_name)
+            if target_obj is None:
+                self.report({"ERROR"}, f"Object `{object_name}` was not found.")
+                return {"CANCELLED"}
+
+            if target_obj.type != "MESH":
+                self.report({"ERROR"}, f"Object `{object_name}` is not a mesh.")
+                return {"CANCELLED"}
+
+            try:
+                from .comfy_unirig_client import run_unirig_for_object
+
+                def _set_unirig_status(message):
+                    scene.unirig_status = message
+                    _tag_redraw()
+
+                def _finish_unirig(success, message):
+                    scene.unirig_running = False
+                    scene.unirig_status = (
+                        f"[UniRig] Completed: {message}"
+                        if success
+                        else f"[UniRig] Failed: {message}"
+                    )
+                    _tag_redraw()
+
+                scene.unirig_running = True
+                scene.unirig_status = "[UniRig] Starting..."
+                run_unirig_for_object(
+                    object_name,
+                    scene.unirig_output_name.strip(),
+                    scene_name=scene.name,
+                    skeleton_template=scene.unirig_skeleton_template,
+                    target_face_count=scene.unirig_target_face_count,
+                    add_subdivision=scene.unirig_add_subdivision,
+                    status_callback=_set_unirig_status,
+                    finished_callback=_finish_unirig,
+                )
+            except Exception as error:
+                scene.unirig_running = False
+                scene.unirig_status = f"[UniRig] Failed: {error}"
+                self.report({"ERROR"}, str(error))
+                return {"CANCELLED"}
+
+            self.report({"INFO"}, "UniRig started. Check Blender console for progress.")
+            return {"FINISHED"}
+
         from . import preview_manager
         from .SceneParser import SceneParser
 
-        scene = context.scene
         user_prompt = scene.gen_prompt
         execution_mode = getattr(scene, "gen_execution_mode", "REFINEMENT")
         if execution_mode not in {"REFINEMENT", "DIRECT"}:
@@ -1411,6 +1481,27 @@ class GENERATOR_PT_panel(bpy.types.Panel):
         scene = context.scene
 
         box = layout.box()
+        box.label(text="Mode", icon="TOOL_SETTINGS")
+        box.prop(scene, "gen_action_mode", text="")
+        box.prop(scene, "gen_mode", text="Rig" if scene.gen_action_mode == "ANIMATE" else "Mesh")
+
+        if scene.gen_action_mode == "RIG":
+            rig_box = layout.box()
+            rig_box.label(text="ComfyUI UniRig", icon="ARMATURE_DATA")
+            rig_box.prop(scene, "unirig_output_name")
+            rig_box.prop(scene, "unirig_skeleton_template")
+            rig_box.prop(scene, "unirig_target_face_count")
+            rig_box.prop(scene, "unirig_add_subdivision")
+            rig_button_row = rig_box.row()
+            rig_button_row.enabled = not scene.unirig_running
+            rig_button_row.operator("generator.generate", text="Rig Object with UniRig", icon="OUTLINER_OB_ARMATURE")
+            if scene.unirig_status:
+                rig_box.separator(factor=0.5)
+                for line in textwrap.wrap(scene.unirig_status, width=45):
+                    rig_box.label(text=line)
+            return
+
+        box = layout.box()
         box.label(text="Prompt", icon="TEXT")
         box.prop(scene, "gen_prompt", text="")
         box.prop(scene, "gen_execution_mode")
@@ -1471,12 +1562,50 @@ class GENERATOR_PT_panel(bpy.types.Panel):
             result_box.label(text="Waiting for generation...")
 
 
+class OBJECT_OT_unirig_comfy_api(bpy.types.Operator):
+    bl_idname = "object.unirig_comfy_api"
+    bl_label = "Rig Object with UniRig"
+    bl_description = "Export selected mesh to ComfyUI UniRig, generate rigged FBX, and import it back"
+
+    def execute(self, context):
+        scene = context.scene
+        object_name = scene.unirig_object_name.strip()
+
+        if not object_name and context.object is not None:
+            object_name = context.object.name
+
+        if not object_name:
+            self.report({"ERROR"}, "Write object name or select a mesh object.")
+            return {"CANCELLED"}
+
+        output_name = scene.unirig_output_name.strip()
+
+        try:
+            from .comfy_unirig_client import run_unirig_for_object
+
+            run_unirig_for_object(
+                object_name,
+                output_name,
+                scene_name=scene.name,
+                skeleton_template=scene.unirig_skeleton_template,
+                target_face_count=scene.unirig_target_face_count,
+                add_subdivision=scene.unirig_add_subdivision,
+            )
+        except Exception as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, "UniRig started. Check Blender console for progress.")
+        return {"FINISHED"}
+
+
 classes = [
     GENERATOR_OT_infer_directions,
     GENERATOR_OT_generate,
     GENERATOR_OT_accept_preview,
     GENERATOR_OT_cancel_preview,
     GENERATOR_PT_panel,
+    OBJECT_OT_unirig_comfy_api,
 ]
 
 
@@ -1491,6 +1620,16 @@ def _on_direction_axis_changed(self, context):
     self.gen_direction_error = _validate_scene_direction_settings(self)
 
 
+def _on_action_mode_changed(self, context):
+    try:
+        items = dropdown_items(self, context)
+        if items:
+            first_value = items[0][0]
+            self.gen_mode = first_value
+    except Exception as error:
+        print(f"[Generator] Failed to update object dropdown after mode change: {error}")
+
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
@@ -1499,6 +1638,17 @@ def register():
         name="",
         description="Enter your prompt",
         default="Write your prompt here...",
+    )
+
+    bpy.types.Scene.gen_action_mode = bpy.props.EnumProperty(
+        name="Mode",
+        description="Choose whether to animate an existing rig or rig a mesh with UniRig",
+        items=[
+            ("ANIMATE", "Animate", "Animate an existing rig / armature"),
+            ("RIG", "Rig", "Rig a mesh with UniRig"),
+        ],
+        default="ANIMATE",
+        update=_on_action_mode_changed,
     )
 
     bpy.types.Scene.gen_mode = bpy.props.EnumProperty(
@@ -1605,25 +1755,94 @@ def register():
         default=False,
     )
 
+    bpy.types.Scene.unirig_object_name = bpy.props.StringProperty(
+        name="Object Name",
+        description="Mesh object to send to UniRig. Leave empty to use selected object.",
+        default="",
+    )
+
+    bpy.types.Scene.unirig_output_name = bpy.props.StringProperty(
+        name="Output FBX Name",
+        description="Generated FBX name. Leave empty to auto-generate.",
+        default="",
+    )
+
+    bpy.types.Scene.unirig_skeleton_template = bpy.props.EnumProperty(
+        name="Skeleton Template",
+        description="Choose UniRig skeleton template",
+        items=[
+            (
+                "articulationxl",
+                "ArticulationXL (Non-Humanoid)",
+                "Best for animals, creatures, props, and non-humanoid objects",
+            ),
+            (
+                "mixamo",
+                "Mixamo (Humanoid)",
+                "Best for human or humanoid characters",
+            ),
+        ],
+        default="articulationxl",
+    )
+
+    bpy.types.Scene.unirig_target_face_count = bpy.props.IntProperty(
+        name="Target Face Count",
+        description="Target mesh face count used by UniRig. Higher values preserve smoother geometry but may take longer.",
+        default=10000,
+        min=1000,
+        max=500000,
+    )
+
+    bpy.types.Scene.unirig_add_subdivision = bpy.props.BoolProperty(
+        name="Add Smooth Subdivision",
+        description="Add a non-destructive subdivision modifier to the imported UniRig mesh",
+        default=True,
+    )
+
+    bpy.types.Scene.unirig_running = bpy.props.BoolProperty(
+        name="UniRig Running",
+        description="True while UniRig is exporting or waiting for ComfyUI",
+        default=False,
+    )
+
+    bpy.types.Scene.unirig_status = bpy.props.StringProperty(
+        name="UniRig Status",
+        description="Current UniRig export and ComfyUI status",
+        default="",
+    )
+
 
 def unregister():
-    del bpy.types.Scene.preview_active
-    del bpy.types.Scene.preview_original_armature_name
-    del bpy.types.Scene.preview_action_name
-    del bpy.types.Scene.preview_armature_name
-    del bpy.types.Scene.preview_collection_name
-    del bpy.types.Scene.gen_direction_inferred_object_name
-    del bpy.types.Scene.gen_direction_inference_ready
-    del bpy.types.Scene.gen_direction_error
-    del bpy.types.Scene.gen_right_axis
-    del bpy.types.Scene.gen_up_axis
-    del bpy.types.Scene.gen_forward_axis
-    del bpy.types.Scene.gen_auto_infer_directions
-    del bpy.types.Scene.gen_prompt
-    del bpy.types.Scene.gen_execution_mode
-    del bpy.types.Scene.gen_mode
-    del bpy.types.Scene.gen_output
-    del bpy.types.Scene.gen_loading
+    for property_name in (
+        "unirig_output_name",
+        "unirig_skeleton_template",
+        "unirig_target_face_count",
+        "unirig_add_subdivision",
+        "unirig_running",
+        "unirig_status",
+        "unirig_object_name",
+        "preview_active",
+        "preview_original_armature_name",
+        "preview_action_name",
+        "preview_armature_name",
+        "preview_scene_name",
+        "preview_collection_name",
+        "gen_execution_mode",
+        "gen_direction_inferred_object_name",
+        "gen_direction_inference_ready",
+        "gen_direction_error",
+        "gen_right_axis",
+        "gen_up_axis",
+        "gen_forward_axis",
+        "gen_auto_infer_directions",
+        "gen_prompt",
+        "gen_action_mode",
+        "gen_mode",
+        "gen_output",
+        "gen_loading",
+    ):
+        if hasattr(bpy.types.Scene, property_name):
+            delattr(bpy.types.Scene, property_name)
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)

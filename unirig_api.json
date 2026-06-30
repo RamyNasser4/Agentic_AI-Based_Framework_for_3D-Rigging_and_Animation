@@ -1,0 +1,55 @@
+{
+  "2": {
+    "inputs": {
+      "skeleton_template": "articulationxl",
+      "fbx_name": "char",
+      "target_face_count": 10000,
+      "debug": false,
+      "trimesh": [
+        "5",
+        0
+      ],
+      "model": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "UniRigAutoRig",
+    "_meta": {
+      "title": "UniRig: Auto Rig"
+    }
+  },
+  "3": {
+    "inputs": {
+      "precision": "auto",
+      "attn_backend": "auto"
+    },
+    "class_type": "UniRigLoadModel",
+    "_meta": {
+      "title": "UniRig: (Down)Load Model"
+    }
+  },
+  "4": {
+    "inputs": {
+      "fbx_output_path": [
+        "2",
+        0
+      ],
+      "preview": ""
+    },
+    "class_type": "UniRigPreviewRiggedMesh",
+    "_meta": {
+      "title": "UniRig: Preview Rigged Mesh"
+    }
+  },
+  "5": {
+    "inputs": {
+      "source_folder": "input",
+      "file_path": "3d/bird.glb"
+    },
+    "class_type": "UniRigLoadMesh",
+    "_meta": {
+      "title": "UniRig: Load Mesh"
+    }
+  }
+}

@@ -197,8 +197,7 @@ few_shots = [
 Semantic direction inference: forward_axis=+Z, up_axis=+Y, right_axis=+X, is_humanoid=false, confidence=0.95, needs_user_confirmation=false"""
         ),
         "user_prompt": "Animate the raccoon standing still while nodding its head up and down.",
-        "plan": (
-            "Step 1: Rotate spine.006 +X 10 degrees; rotate tail +Y 5 degrees;"
+        "plan": ( "Step 1: Rotate spine.006 +X 10 degrees; rotate tail +Y 5 degrees;"
             "Step 2: Rotate spine.006 -X 10 degrees; rotate tail -Y 10 degrees;"
             "Step 3: Rotate spine.006 +X 10 degrees; rotate tail +Y 10 degrees;"
             "Step 4: Rotate spine.006 -X 10 degrees; rotate tail -Y 5 degrees;"
@@ -221,8 +220,7 @@ Semantic direction inference: forward_axis=+Z, up_axis=+Y, right_axis=+X, is_hum
             "Step 3: Move Armature +Z 1 units; rotate Spine1 -Y 20 degrees; rotate Spine2 -Y 10 degrees; rotate Spine3 -Y 5 degrees; rotate Head -Y 10 degrees; rotate TopFlipper.L -Z 20 degrees; rotate TopFlipper.R -Z 20 degrees; rotate Tail -Y 15 degrees;"
             "Step 4: Move Armature +Z 1 units; rotate Spine1 +Y 10 degrees; rotate Spine2 +Y 5 degrees; rotate Head +Y 5 degrees; rotate TopFlipper.L +Z 10 degrees; rotate TopFlipper.R +Z 10 degrees; rotate Tail +Y 10 degrees;"
         )
-    },
-    
+    },   
 ]
 
 FREE_MODELS = [
@@ -288,12 +286,12 @@ def get_llm(model: str):
     #     api_key=getenv("HF_TOKEN"),
     #     temperature=0,
     # )
-    return ChatGoogleGenerativeAI(
-        model="gemma-4-31b-it",
+      return ChatGoogleGenerativeAI(
+            model="gemma-4-31b-it",
         google_api_key=getenv("GOOGLE_API_KEY"),
-        temperature=0
+         temperature=0
     )
-    # return ChatGoogleGenerativeAI(
+ # return ChatGoogleGenerativeAI(
     #     model="gemini-3.5-flash",
     #     google_api_key=getenv("GOOGLE_API_KEY"),
     #     temperature=0,
